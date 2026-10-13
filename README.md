@@ -101,3 +101,71 @@ Browse the database at <http://localhost:8081>.
 ruff check . ; ruff format --check .
 pytest --cov=app
 ```
+
+## Step 2 — IoT layer: ESP32 firmware in Wokwi
+
+**Goal:** a simulated ESP32 that detects cars on 4 spots and at the gate, shows each spot on
+green/red LEDs, and opens a servo barrier — tested on its own with the serial monitor.
+
+### Circuit (`firmware/diagram.json`)
+
+| Spot | TRIG | ECHO | Green LED | Red LED |
+|---|---|---|---|---|
+| P1 | 4 | 34 | 16 (RX2) | 17 (TX2) |
+| P2 | 5 | 35 | 18 | 19 |
+| P3 | 23 | 36 (VP) | 25 | 26 |
+| P4 | 27 | 39 (VN) | 32 | 33 |
+| Gate | 13 | 14 | – | – |
+| Servo | 21 (signal) | – | – | – |
+
+ECHO pins use GPIO 34/35/36/39, which are input-only on the ESP32 — ideal for echo signals.
+Every LED has a 220 Ω resistor. On real hardware the 5 V echo would need a voltage divider;
+Wokwi doesn't need one.
+
+### Firmware (`firmware/`)
+
+| File | Role |
+|---|---|
+| `include/config.h` | Every pin, threshold and timing in one place |
+| `include/Debouncer.h` | Stable state after N identical readings (pure C++, no Arduino dependency) |
+| `include/Ultrasonic.h` | One HC-SR04 measurement in cm (timeout → 400 cm = nothing in range) |
+| `include/Barrier.h`, `src/Barrier.cpp` | Servo barrier as a state machine |
+| `src/main.cpp` | Scheduling, LEDs, gate rule, JSON report |
+
+**How it works**
+
+1. **Round-robin sensing.** Every 100 ms the firmware measures *one* sensor (P1 → P2 → P3 → P4
+   → gate → P1 …), so each sensor is read every 500 ms and two sensors never fire at the same
+   time (no echo crosstalk on real hardware).
+2. **Occupied** when the distance is below 50 cm. **Debounce:** a spot only changes state after
+   3 identical readings in a row (~1.5 s), so a slider passing by doesn't flicker. The gate uses 2.
+3. **LEDs update immediately** on a change — local feedback that works even without network.
+4. **Barrier state machine** (non-blocking, the servo moves 3° every 15 ms):
+
+   ```
+   CLOSED ──car at gate & free spot──▶ OPENING ──90°──▶ OPEN
+   OPEN ──gate clear for 5 s──▶ CLOSING ──0°──▶ CLOSED
+   CLOSING ──car appears──▶ OPENING      (safety: never close on a car)
+   ```
+   If the parking is full, the barrier stays closed and the serial monitor says so.
+5. **Report** in the API's JSON format (`docs/contracts/sensor-reading.schema.json`):
+   immediately on any change, plus a heartbeat every 5 s. In this step it is printed on the
+   serial monitor; in Step 4 the same JSON is sent to the API over Wi-Fi.
+
+Everything is scheduled with `millis()` — there is no `delay()` in the code. The only waits are
+the 10 µs trigger pulse and `pulseIn()`, bounded at 25 ms.
+
+### Run it
+
+1. Open the `firmware/` folder in VS Code (PlatformIO and Wokwi extensions installed).
+2. Build: PlatformIO sidebar → *Build*, or `pio run` in a terminal.
+3. `F1` → **Wokwi: Start Simulator** (first time: activate your Wokwi license).
+4. Click a sensor and move its distance slider below 50 cm:
+
+```
+[spot] P1 -> occupied (23.0 cm), 3/4 free
+[report:change] {"device_id":"esp32-parking-01","spots":[{"spot_id":"P1","distance_cm":23,"occupied":true}, ...],"gate_car_detected":false,"barrier_state":"closed"}
+```
+
+5. Move the **GATE** sensor below 50 cm → the servo opens to 90°; move it back above 50 cm →
+   it closes 5 s later. With all 4 spots occupied, the barrier stays closed.

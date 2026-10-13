@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sensor-reading.schema.json",
+  "title": "Sensor reading",
+  "description": "Body of POST /api/v1/sensors/reading, sent by the ESP32 on every change and as a heartbeat every 5 s.",
+  "type": "object",
+  "required": ["device_id", "spots", "gate_car_detected", "barrier_state"],
+  "additionalProperties": false,
+  "properties": {
+    "device_id": { "type": "string", "examples": ["esp32-parking-01"] },
+    "spots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["spot_id", "distance_cm", "occupied"],
+        "additionalProperties": false,
+        "properties": {
+          "spot_id": { "type": "string", "enum": ["P1", "P2", "P3", "P4"] },
+          "distance_cm": { "type": "number", "minimum": 0, "maximum": 400 },
+          "occupied": { "type": "boolean" }
+        }
+      }
+    },
+    "gate_car_detected": { "type": "boolean" },
+    "barrier_state": { "type": "string", "enum": ["closed", "opening", "open", "closing"] }
+  },
+  "examples": [
+    {
+      "device_id": "esp32-parking-01",
+      "spots": [
+        { "spot_id": "P1", "distance_cm": 23.4, "occupied": true },
+        { "spot_id": "P2", "distance_cm": 310.0, "occupied": false },
+        { "spot_id": "P3", "distance_cm": 400.0, "occupied": false },
+        { "spot_id": "P4", "distance_cm": 12.0, "occupied": true }
+      ],
+      "gate_car_detected": false,
+      "barrier_state": "closed"
+    }
+  ]
+}
