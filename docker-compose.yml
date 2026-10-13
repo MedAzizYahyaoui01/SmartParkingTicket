@@ -40,6 +40,11 @@ services:
       MONGO_DB: ${MONGO_DB}
       API_KEY: ${API_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      FIREBASE_DATABASE_URL: ${FIREBASE_DATABASE_URL}
+      FIREBASE_CREDENTIALS: /run/secrets/firebase-service-account.json
+    volumes:
+      # The service-account key is mounted read-only; it is never baked into the image.
+      - ./secrets:/run/secrets:ro
     ports:
       - "8000:8000"
 
