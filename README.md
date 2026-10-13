@@ -34,7 +34,7 @@ The VM uses NAT networking, so its ports are forwarded to the host (bound to `12
 
 | Host port | VM port | Service |
 |---|---|---|
-| 27017 | 27017 | MongoDB |
+| 27018 | 27018 | MongoDB of this project (27017 is left to another MongoDB on the VM) |
 | 8081 | 8081 | mongo-express |
 | 8001 | 8000 | API running in Docker |
 | 8080 | 80 | Dashboard running in Docker |
