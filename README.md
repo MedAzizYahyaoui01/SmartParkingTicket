@@ -1,4 +1,4 @@
-# Smart Parking IoT — real-time availability and occupancy prediction
+# Smart Parking IoT â€” real-time availability and occupancy prediction
 
 A connected 4-spot parking: an ESP32 (simulated in Wokwi) detects cars with ultrasonic sensors,
 a FastAPI server stores the live state in Firebase and the history in MongoDB, an ML module
@@ -8,9 +8,9 @@ and simulated reservations.
 The full design is in [`docs/project-report.pdf`](docs/project-report.pdf).
 
 ```
-ESP32 (Wokwi) ──readings──▶ FastAPI ──current state──▶ Firebase RTDB ──live──▶ React dashboard
-              ◀─barrier────         ──history────────▶ MongoDB                      │
-                                    ◀──────────── REST (stats, predictions, reservations)
+ESP32 (Wokwi) â”€â”€readingsâ”€â”€â–¶ FastAPI â”€â”€current stateâ”€â”€â–¶ Firebase RTDB â”€â”€liveâ”€â”€â–¶ React dashboard
+              â—€â”€barrierâ”€â”€â”€â”€         â”€â”€historyâ”€â”€â”€â”€â”€â”€â”€â”€â–¶ MongoDB                      â”‚
+                                    â—€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ REST (stats, predictions, reservations)
 ```
 
 ## Repository layout
@@ -46,7 +46,7 @@ The VM uses NAT networking, so its ports are forwarded to the host (bound to `12
 
 Each step ends with something that runs. Steps are added as the project progresses.
 
-## Step 1 — Project setup
+## Step 1 â€” Project setup
 
 **Goal:** a clean monorepo, MongoDB running in Docker, an empty FastAPI app with a health check,
 and CI running on every push.
@@ -56,20 +56,20 @@ and CI running on every push.
 - **Monorepo structure** following the report (`firmware/`, `backend/`, `frontend/`, `tools/`, `docs/`).
 - **Secrets handling:** all secrets live in `.env` (git-ignored). `.env.example` documents every
   variable. Firebase service-account files are also git-ignored by pattern.
-- **Backend skeleton** (`backend/app/`), layered as `routers/ → services/ → repositories/`
+- **Backend skeleton** (`backend/app/`), layered as `routers/ â†’ services/ â†’ repositories/`
   with `schemas/` and `ml/`:
-  - `config.py` — settings loaded from environment variables with `pydantic-settings`.
-  - `db.py` — one async MongoDB client for the whole app. It uses PyMongo's native async API
+  - `config.py` â€” settings loaded from environment variables with `pydantic-settings`.
+  - `db.py` â€” one async MongoDB client for the whole app. It uses PyMongo's native async API
     (`AsyncMongoClient`), the official successor of Motor, which reached end of life in 2026.
-  - `routers/health.py` — `GET /health` returns `{"status": "ok", "version": ..., "mongo": "up"|"down"}`.
+  - `routers/health.py` â€” `GET /health` returns `{"status": "ok", "version": ..., "mongo": "up"|"down"}`.
     It always answers 200 while the process is alive (a liveness check); the `mongo` field
     shows whether the database is reachable.
 - **Docker Compose** with `mongo` (named volume, healthcheck, root user from `.env`),
   `mongo-express`, and the `api` service built from `backend/Dockerfile`.
 - **Tests:** `tests/test_health.py` checks `/health` with MongoDB up and down (the ping is
   replaced by a fake, so the tests need no database).
-- **CI** (`.github/workflows/ci.yml`): on every push/PR → ruff lint + format check →
-  PyTest with coverage → Docker image build.
+- **CI** (`.github/workflows/ci.yml`): on every push/PR â†’ ruff lint + format check â†’
+  PyTest with coverage â†’ Docker image build.
 
 ### Run it
 
@@ -91,7 +91,7 @@ pip install -r requirements-dev.txt
 uvicorn app.main:app --reload
 ```
 
-Open <http://localhost:8000/health> → `{"status":"ok","version":"0.1.0","mongo":"up"}`
+Open <http://localhost:8000/health> â†’ `{"status":"ok","version":"0.1.0","mongo":"up"}`
 and <http://localhost:8000/docs> for the interactive API docs.
 Browse the database at <http://localhost:8081>.
 
@@ -102,10 +102,10 @@ ruff check . ; ruff format --check .
 pytest --cov=app
 ```
 
-## Step 2 — IoT layer: ESP32 firmware in Wokwi
+## Step 2 â€” IoT layer: ESP32 firmware in Wokwi
 
 **Goal:** a simulated ESP32 that detects cars on 4 spots and at the gate, shows each spot on
-green/red LEDs, and opens a servo barrier — tested on its own with the serial monitor.
+green/red LEDs, and opens a servo barrier â€” tested on its own with the serial monitor.
 
 ### Circuit (`firmware/diagram.json`)
 
@@ -115,11 +115,11 @@ green/red LEDs, and opens a servo barrier — tested on its own with the serial 
 | P2 | 5 | 35 | 18 | 19 |
 | P3 | 23 | 36 (VP) | 25 | 26 |
 | P4 | 27 | 39 (VN) | 32 | 33 |
-| Gate | 13 | 14 | – | – |
-| Servo | 21 (signal) | – | – | – |
+| Gate | 13 | 14 | â€“ | â€“ |
+| Servo | 21 (signal) | â€“ | â€“ | â€“ |
 
-ECHO pins use GPIO 34/35/36/39, which are input-only on the ESP32 — ideal for echo signals.
-Every LED has a 220 Ω resistor. On real hardware the 5 V echo would need a voltage divider;
+ECHO pins use GPIO 34/35/36/39, which are input-only on the ESP32 â€” ideal for echo signals.
+Every LED has a 220 Î© resistor. On real hardware the 5 V echo would need a voltage divider;
 Wokwi doesn't need one.
 
 ### Firmware (`firmware/`)
@@ -128,38 +128,38 @@ Wokwi doesn't need one.
 |---|---|
 | `include/config.h` | Every pin, threshold and timing in one place |
 | `include/Debouncer.h` | Stable state after N identical readings (pure C++, no Arduino dependency) |
-| `include/Ultrasonic.h` | One HC-SR04 measurement in cm (timeout → 400 cm = nothing in range) |
+| `include/Ultrasonic.h` | One HC-SR04 measurement in cm (timeout â†’ 400 cm = nothing in range) |
 | `include/Barrier.h`, `src/Barrier.cpp` | Servo barrier as a state machine |
 | `src/main.cpp` | Scheduling, LEDs, gate rule, JSON report |
 
 **How it works**
 
-1. **Round-robin sensing.** Every 100 ms the firmware measures *one* sensor (P1 → P2 → P3 → P4
-   → gate → P1 …), so each sensor is read every 500 ms and two sensors never fire at the same
+1. **Round-robin sensing.** Every 100 ms the firmware measures *one* sensor (P1 â†’ P2 â†’ P3 â†’ P4
+   â†’ gate â†’ P1 â€¦), so each sensor is read every 500 ms and two sensors never fire at the same
    time (no echo crosstalk on real hardware).
 2. **Occupied** when the distance is below 50 cm. **Debounce:** a spot only changes state after
    3 identical readings in a row (~1.5 s), so a slider passing by doesn't flicker. The gate uses 2.
-3. **LEDs update immediately** on a change — local feedback that works even without network.
-4. **Barrier state machine** (non-blocking, the servo moves 3° every 15 ms):
+3. **LEDs update immediately** on a change â€” local feedback that works even without network.
+4. **Barrier state machine** (non-blocking, the servo moves 3Â° every 15 ms):
 
    ```
-   CLOSED ──car at gate & free spot──▶ OPENING ──90°──▶ OPEN
-   OPEN ──gate clear for 5 s──▶ CLOSING ──0°──▶ CLOSED
-   CLOSING ──car appears──▶ OPENING      (safety: never close on a car)
+   CLOSED â”€â”€car at gate & free spotâ”€â”€â–¶ OPENING â”€â”€90Â°â”€â”€â–¶ OPEN
+   OPEN â”€â”€gate clear for 5 sâ”€â”€â–¶ CLOSING â”€â”€0Â°â”€â”€â–¶ CLOSED
+   CLOSING â”€â”€car appearsâ”€â”€â–¶ OPENING      (safety: never close on a car)
    ```
    If the parking is full, the barrier stays closed and the serial monitor says so.
 5. **Report** in the API's JSON format (`docs/contracts/sensor-reading.schema.json`):
    immediately on any change, plus a heartbeat every 5 s. In this step it is printed on the
    serial monitor; in Step 4 the same JSON is sent to the API over Wi-Fi.
 
-Everything is scheduled with `millis()` — there is no `delay()` in the code. The only waits are
-the 10 µs trigger pulse and `pulseIn()`, bounded at 25 ms.
+Everything is scheduled with `millis()` â€” there is no `delay()` in the code. The only waits are
+the 10 Âµs trigger pulse and `pulseIn()`, bounded at 25 ms.
 
 ### Run it
 
 1. Open the `firmware/` folder in VS Code (PlatformIO and Wokwi extensions installed).
-2. Build: PlatformIO sidebar → *Build*, or `pio run` in a terminal.
-3. `F1` → **Wokwi: Start Simulator** (first time: activate your Wokwi license).
+2. Build: PlatformIO sidebar â†’ *Build*, or `pio run` in a terminal.
+3. `F1` â†’ **Wokwi: Start Simulator** (first time: activate your Wokwi license).
 4. Click a sensor and move its distance slider below 50 cm:
 
 ```
@@ -167,5 +167,119 @@ the 10 µs trigger pulse and `pulseIn()`, bounded at 25 ms.
 [report:change] {"device_id":"esp32-parking-01","spots":[{"spot_id":"P1","distance_cm":23,"occupied":true}, ...],"gate_car_detected":false,"barrier_state":"closed"}
 ```
 
-5. Move the **GATE** sensor below 50 cm → the servo opens to 90°; move it back above 50 cm →
+5. Move the **GATE** sensor below 50 cm â†’ the servo opens to 90Â°; move it back above 50 cm â†’
    it closes 5 s later. With all 4 spots occupied, the barrier stays closed.
+
+## Step 3 â€” API + databases
+
+**Goal:** the API receives the ESP32 readings, keeps the *current* state in Firebase, the
+*history* in MongoDB, and answers with the barrier command.
+
+### Endpoints added
+
+| Method | Route | Used by | Purpose |
+|---|---|---|---|
+| POST | `/api/v1/sensors/reading` | ESP32 (needs `X-API-Key`) | Receive spot states, return the barrier command |
+| GET | `/api/v1/spots` | Dashboard | Current state of every spot, device and barrier |
+| POST | `/api/v1/barrier/command` | Dashboard | Manual `open` / `close`, delivered in the ESP32's next response |
+
+Request/response example:
+
+```
+POST /api/v1/sensors/reading      X-API-Key: <API_KEY>
+{"device_id": "esp32-parking-01",
+ "spots": [{"spot_id": "P1", "distance_cm": 23.4, "occupied": true}, ...],
+ "gate_car_detected": true, "barrier_state": "closed"}
+
+200 OK
+{"barrier_command": "open", "free_spots": 3}
+```
+
+### Code layout
+
+```
+routers/       HTTP only: parse, validate, call the service
+  sensors.py     POST /sensors/reading
+  parking.py     GET /spots, POST /barrier/command
+services/
+  parking.py     ALL business rules (the only place deciding what is written where)
+  background.py  periodic jobs
+repositories/
+  realtime.py    Firebase (live state) + in-memory stand-in
+  history.py     MongoDB (history) + in-memory stand-in
+schemas/       Pydantic models = the API contract
+```
+
+Each repository has an in-memory twin with the same methods, so the business rules are
+tested without any network.
+
+### Business rules
+
+- **Validation (422):** unknown spot ID, negative distance, duplicate spot, unknown field,
+  malformed JSON. **Security (401):** missing or wrong `X-API-Key` (compared in constant time).
+- **Change detection:** the service remembers each spot's last status. Only a real change
+  becomes a MongoDB event (`occupancy_events`); a heartbeat just refreshes `last_seen`.
+  After a restart, the last states are reloaded from Firebase so nothing is counted twice.
+- **One Firebase request per reading:** spots, summary, device and barrier are written with
+  a single *multi-path update*.
+- **Barrier:** a dashboard command wins and is delivered **once**; otherwise the automatic
+  rule answers `open` when a car waits at the gate and a spot is free. Every barrier movement
+  is logged in `barrier_events` with its source (`auto`, `dashboard` or `device`).
+- **Snapshots:** every minute, the occupancy rate (e.g. 3/4 = 0.75) goes into
+  `occupancy_snapshots`, a MongoDB **time-series** collection. This is the series the AI
+  learns from. No snapshot is stored while the device is offline, so the data is never made up.
+- **Offline detection:** no reading for 15 s â†’ `parking/device/online = false` in Firebase.
+- **Resilience:** if MongoDB or Firebase fails, the error is logged but the ESP32 still gets
+  its answer.
+
+### Firebase structure
+
+```
+parking/
+  spots/P1      {status: "free"|"occupied", distance_cm, updated_at}
+  summary       {free, occupied, reserved, total}
+  device        {online, last_seen, device_id}
+  gate_car_detected
+barrier/
+  state         "closed"|"opening"|"open"|"closing"
+  command       {action, source, issued_at, status: "pending"|"delivered"}
+```
+
+Security rules (`firebase/database.rules.json`): the browser can **read** everything and
+**write** nothing; only the API writes, through the Admin SDK and a service account.
+
+### ESP32 simulator (`tools/esp32_simulator.py`)
+
+Sends exactly the firmware's JSON with random traffic (cars arrive, park, leave) and applies
+the barrier commands it receives, so the backend can be demoed without Wokwi:
+
+```powershell
+python tools/esp32_simulator.py --api-key <API_KEY> --speed 3
+```
+```
+- car arrived at the gate
+  sent: 1/4 occupied, barrier open -> command open, 3 free
+- car drove in and parked on P1
+  sent: 2/4 occupied, barrier closed -> command none, 2 free
+```
+
+### Tests (40, coverage 93%)
+
+| File | Level | What it proves |
+|---|---|---|
+| `test_parking_service.py` | Unit | change detection, restart, barrier rules, offline, snapshots, resilience |
+| `test_api.py` | API | 200 / 202 / 401 / 422 on every endpoint |
+| `test_contract.py` | Contract | simulator and API agree with `docs/contracts/sensor-reading.schema.json` |
+| `test_integration.py` | Integration | simulated ESP32 â†’ API â†’ real MongoDB (time-series included) |
+| `test_realtime_store.py` | Unit | Firebase stand-in behaves like Firebase |
+
+The integration test runs when `TEST_MONGO_URI` is set; CI starts a MongoDB service
+container for it.
+
+### Run it
+
+1. Firebase: put the service-account key in `secrets/firebase-service-account.json`
+   (git-ignored) and set `FIREBASE_DATABASE_URL` in `.env`.
+2. Start the API (`uvicorn app.main:app --reload` in `backend/`), then the simulator.
+3. Watch the data arrive live in the Firebase console â†’ Realtime Database, and in
+   mongo-express (<http://localhost:8081>).
