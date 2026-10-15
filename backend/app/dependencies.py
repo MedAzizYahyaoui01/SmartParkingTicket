@@ -6,6 +6,7 @@ from fastapi import Header, HTTPException, Request, status
 
 from app.config import Settings
 from app.services.parking import ParkingService
+from app.services.stats import StatsService
 
 
 def get_settings_dep(request: Request) -> Settings:
@@ -14,6 +15,10 @@ def get_settings_dep(request: Request) -> Settings:
 
 def get_parking(request: Request) -> ParkingService:
     return request.app.state.parking
+
+
+def get_stats(request: Request) -> StatsService:
+    return request.app.state.stats
 
 
 async def require_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> None:

@@ -9,9 +9,10 @@ from app import db
 from app.config import Settings, get_settings
 from app.repositories.history import HistoryRepository, MongoHistoryRepository
 from app.repositories.realtime import RealtimeStore, build_realtime_store
-from app.routers import health, parking, sensors
+from app.routers import health, parking, reservations, sensors, stats
 from app.services.background import run_periodically
 from app.services.parking import ParkingService
+from app.services.stats import StatsService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -38,11 +39,13 @@ def create_app(
         service = ParkingService(realtime, history_repo, settings)
         await service.startup()
         app.state.parking = service
+        app.state.stats = StatsService(history_repo, settings.timezone)
 
         tasks = []
         if background_tasks:
             tasks = [
                 asyncio.create_task(run_periodically(5, service.check_device_online)),
+                asyncio.create_task(run_periodically(5, service.expire_reservations)),
                 asyncio.create_task(
                     run_periodically(settings.snapshot_interval_s, service.take_snapshot)
                 ),
@@ -66,6 +69,8 @@ def create_app(
     app.include_router(health.router)
     app.include_router(sensors.router, prefix="/api/v1")
     app.include_router(parking.router, prefix="/api/v1")
+    app.include_router(reservations.router, prefix="/api/v1")
+    app.include_router(stats.router, prefix="/api/v1")
     return app
 
 

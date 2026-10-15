@@ -60,19 +60,20 @@ class SimulatedParking:
         free = [s for s in SPOT_IDS if self.distances[s] >= OCCUPIED_THRESHOLD_CM]
         taken = [s for s in SPOT_IDS if s not in free]
 
-        if self.gate_distance < OCCUPIED_THRESHOLD_CM:
-            # A car at the gate drives in once the barrier is open.
-            if self.barrier_state == "open" and free:
-                spot = rng.choice(free)
-                self.gate_distance = 300.0
-                self.park(spot)
-                self.barrier_state = "closed"  # closes behind the car
-                return f"car drove in and parked on {spot}"
-            return None
-        if roll < 0.10:
+        car_waiting = self.gate_distance < OCCUPIED_THRESHOLD_CM
+        if car_waiting and self.barrier_state == "open" and free:
+            # The car at the gate drives in once the barrier is open.
+            spot = rng.choice(free)
+            self.gate_distance = 300.0
+            self.park(spot)
+            self.barrier_state = "closed"  # closes behind the car
+            return f"car drove in and parked on {spot}"
+        if roll < 0.10 and not car_waiting:
             self.gate_distance = 20.0
             return "car arrived at the gate"
-        if roll < 0.20 and taken:
+        # Parked cars keep leaving, even while a car waits (otherwise a full parking
+        # with a car at the gate would never change again).
+        if 0.10 <= roll < 0.20 and taken:
             spot = rng.choice(taken)
             self.leave(spot)
             return f"car left {spot}"

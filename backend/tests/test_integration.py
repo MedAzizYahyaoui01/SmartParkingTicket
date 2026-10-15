@@ -64,3 +64,62 @@ def test_simulated_esp32_flow_end_to_end(mongo_db_name, store):
     assert "occupancy_snapshots" in db.list_collection_names(filter={"type": "timeseries"})
     assert store.get("parking/spots/P2/status") == "occupied"
     assert store.get("parking/summary")["free"] == 3
+
+
+def test_stats_and_reservations_on_real_mongo(mongo_db_name, store):
+    """The aggregation pipelines give the same results as the in-memory twin."""
+    from datetime import UTC, datetime, timedelta
+
+    settings = Settings(
+        _env_file=None,
+        api_key=API_KEY,
+        mongo_uri=MONGO_URI,
+        mongo_db=mongo_db_name,
+        timezone="Africa/Tunis",
+    )
+    app = create_app(settings, store=store, background_tasks=False)
+    monday_8h_utc = datetime(2026, 10, 12, 8, 0, tzinfo=UTC)  # 09:00 in Tunis
+
+    with TestClient(app) as client:
+        # Seed one hour of snapshots (0.25 then 0.75) and one 30-minute stay on P1
+        db = MongoClient(MONGO_URI)[mongo_db_name]
+        db.occupancy_snapshots.insert_many(
+            {
+                "ts": monday_8h_utc + timedelta(minutes=m),
+                "rate": 0.25 if m < 30 else 0.75,
+                "occupied": 1 if m < 30 else 3,
+                "total": 4,
+            }
+            for m in range(60)
+        )
+        db.occupancy_events.insert_many(
+            [
+                {"spot_id": "P1", "occupied": True, "ts": monday_8h_utc},
+                {"spot_id": "P1", "occupied": False, "ts": monday_8h_utc + timedelta(minutes=30)},
+            ]
+        )
+        period = {"from": "2026-10-12T00:00:00", "to": "2026-10-13T00:00:00"}
+
+        series = client.get("/api/v1/stats/occupancy", params={**period, "step": 30}).json()
+        assert [p["rate"] for p in series["points"]] == [0.25, 0.75]
+        assert datetime.fromisoformat(series["points"][0]["ts"]) == monday_8h_utc
+
+        summary = client.get("/api/v1/stats/summary", params=period).json()
+        assert summary["samples"] == 60
+        assert summary["avg_rate"] == 0.5
+        assert summary["entries"] == 1
+        assert summary["avg_duration_min"] == 30.0
+        assert [(c["weekday"], c["hour"]) for c in summary["heatmap"]] == [(0, 9)]
+
+        # Reservation lifecycle is logged in MongoDB
+        client.post(
+            "/api/v1/sensors/reading",
+            json=SimulatedParking().payload(),
+            headers={"X-API-Key": API_KEY},
+        )
+        res_id = client.post(
+            "/api/v1/reservations", json={"name": "Amine", "spot_id": "P2"}
+        ).json()["id"]
+        assert client.delete(f"/api/v1/reservations/{res_id}").status_code == 204
+
+    assert db.reservations.find_one({"_id": res_id})["status"] == "cancelled"

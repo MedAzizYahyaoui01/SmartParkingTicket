@@ -379,3 +379,111 @@ loop()  ◀─pollCommand()──  [command queue]            ◀── barrier_
   set `API_URL` in `secrets.h` to `https://<tunnel-host>/api/v1/sensors/reading`.
 - **No Wokwi at all:** `python tools/esp32_simulator.py --api-key <API_KEY>` sends the same
   JSON (Step 3).
+
+## Step 5 — Dashboard, reservations and statistics
+
+**Goal:** a React dashboard that shows the parking live, controls the barrier, books spots
+and shows statistics computed from the MongoDB history.
+
+### New API endpoints
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/v1/reservations` | Active reservations |
+| POST | `/api/v1/reservations` | `{"name", "spot_id", "duration_min"}` → 201, or **409** if the spot is occupied / already reserved |
+| DELETE | `/api/v1/reservations/{id}` | Cancel → 204, or 404 |
+| GET | `/api/v1/stats/occupancy?from&to&step` | Average occupancy rate per bucket of `step` minutes |
+| GET | `/api/v1/stats/summary?from&to` | Average occupancy, entries, average parking time, peak hours, weekday × hour heatmap |
+
+`from`/`to` are ISO dates (default: the last 24 h). A date without a time zone is read in
+the parking's time zone (`TIMEZONE` in `.env`, e.g. `Africa/Tunis`); statistics are grouped
+by **local** hour and weekday.
+
+### Reservation rules (`services/parking.py`)
+
+- The sensors give the *physical* status (free/occupied). A free spot with an active
+  reservation is shown **reserved** (orange) and no longer counts as free — so the barrier
+  doesn't open for it automatically.
+- A spot can't be reserved twice, nor while occupied or before its state is known (409).
+- A reservation ends in one of three ways, logged in MongoDB (`reservations` collection):
+  **fulfilled** (a car parks on the spot), **cancelled** (dashboard), **expired** (a
+  background task checks every 5 s).
+- Active reservations live in Firebase (`reservations/{id}`), so the dashboard shows them
+  live, and the API reloads them after a restart.
+
+### Statistics (`services/stats.py`, `repositories/history.py`)
+
+The heavy lifting is done by MongoDB **aggregation pipelines** on the time-series collection:
+`$dateTrunc` (buckets of N minutes, aligned on local time) and `$isoDayOfWeek` / `$hour`
+with a time zone (heatmap). The in-memory twin computes the same results in Python, and an
+integration test checks both agree on a real MongoDB.
+
+Entries and average parking time come from `occupancy_events`: each arrival on a spot is
+paired with the next departure. Stays that started before the period, or haven't ended,
+are left out instead of being guessed.
+
+### Synthetic history (`tools/seed_history.py`)
+
+A live demo only has minutes of data. This script simulates the 4 spots minute by minute
+over the past N days (quiet nights, a morning peak, a lunch rush, calmer weekends; average
+stays of 45–90 min) and writes exactly what the API would have written. Every document is
+tagged `synthetic: true`, and the data stops where real data begins, so the two never mix.
+
+```powershell
+python tools/seed_history.py --days 28     # re-running replaces the previous synthetic data
+python tools/seed_history.py --clear       # remove it
+```
+
+### Dashboard (`frontend/`)
+
+React 18 + Vite, React Router, Tailwind CSS, Recharts, Firebase JS SDK.
+
+| Page | Content |
+|---|---|
+| **Live map** | SVG plan: green = free, red = occupied, orange = reserved, grey = no signal (always with a text label). "3 / 4 free" counter. Barrier position (animated) and Open / Close buttons. Click a free spot → reservation dialog. |
+| **Reservations** | Booking form (name, spot, duration) and the active reservations with a live countdown and Cancel. |
+| **Statistics** | Period (24 h / 7 days / 30 days), key figures, occupancy curve, average by hour, weekday × hour heatmap, and the hourly values as a table. |
+
+How the data flows:
+
+```
+Live state:  Firebase ──onValue (push, no polling)──▶ dashboard
+Actions:     dashboard ──REST──▶ API ──▶ Firebase + MongoDB
+Statistics:  dashboard ──REST──▶ API ──aggregation──▶ MongoDB
+```
+
+- One Firebase subscription for the whole app (`lib/live.jsx`), shared through a React
+  context. Firebase is read-only for the browser and needs only the database URL.
+- **Fallback:** with `VITE_FIREBASE_DATABASE_URL` empty, the same data is polled from the
+  API every 2 s, so the dashboard works without Firebase.
+- The header shows "Sensors online/offline". It also turns offline if `last_seen` is older
+  than 20 s, in case the API itself stopped (Firebase would otherwise keep the last value).
+- A toast appears when the barrier opens; the occupancy curve leaves a gap where there is
+  no data instead of drawing a line across it.
+
+Also fixed in this step: the ESP32 simulator froze when the parking was full and a car was
+waiting at the gate (no car could leave any more).
+
+### Run it
+
+1. **Publish the Firebase security rules** (once): Firebase console → Realtime Database →
+   *Rules*, paste the content of `firebase/database.rules.json`, click **Publish**.
+   Without it the dashboard shows `permission_denied`.
+2. `.env` (repo root) needs `TIMEZONE`, `VITE_API_URL` and `VITE_FIREBASE_DATABASE_URL`
+   (see `.env.example`).
+3. Start MongoDB (VM) and the API (`uvicorn app.main:app --port 8000` in `backend/`).
+4. Seed the history once: `python tools/seed_history.py --days 28`
+5. Start the dashboard:
+
+   ```powershell
+   cd frontend
+   npm install
+   npm run dev          # http://localhost:5173
+   ```
+6. Start Wokwi (or `python tools/esp32_simulator.py --api-key <API_KEY> --speed 0.3`).
+
+### Tests (75, coverage 90%)
+
+New: `test_reservations.py` (rules + 409/404/422), `test_stats.py` (buckets, local time,
+peak hours, parking time, parameter validation), and a MongoDB integration test of the
+aggregation pipelines and the reservation log. CI now also builds the dashboard.
