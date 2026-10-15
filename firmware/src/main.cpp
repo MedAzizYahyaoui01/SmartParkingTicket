@@ -1,15 +1,14 @@
 // Smart Parking — ESP32 firmware
 //
 // Reads 4 spot sensors + 1 gate sensor, shows each spot's state on its LEDs,
-// drives the entry barrier, and builds the JSON report for the API.
-// Fully non-blocking: everything is scheduled with millis(), never delay().
-//
-// Phase 2: the report is printed on the serial monitor.
-// Phase 4: the same report will be POSTed to the API over Wi-Fi.
+// drives the entry barrier, and sends a JSON report to the API over Wi-Fi.
+// Fully non-blocking: everything is scheduled with millis(), never delay(); the network
+// runs in its own task (ApiLink), so a slow API never delays the sensors.
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
+#include "ApiLink.h"
 #include "Barrier.h"
 #include "Debouncer.h"
 #include "Ultrasonic.h"
@@ -24,6 +23,7 @@ Debouncer gateCar;
 float gateDistanceCm = cfg::NO_ECHO_CM;
 
 Barrier barrier;
+Barrier::State lastReportedBarrier = Barrier::State::CLOSED;
 
 size_t nextSensor = 0;  // 0..SPOT_COUNT-1 = spots, SPOT_COUNT = gate
 uint32_t lastSensorTickMs = 0;
@@ -73,7 +73,8 @@ void readSensor(size_t index) {
 }
 
 // Local gate rule: a car is waiting and there is room -> open.
-// (From Phase 4 on, a command from the API can also open or close the barrier.)
+// It works without the network; the API applies the same rule and can also send
+// manual open/close commands from the dashboard (see applyApiCommand).
 void applyGateRule() {
   if (!gateCar.state() || barrier.state() != Barrier::State::CLOSED) return;
 
@@ -85,9 +86,23 @@ void applyGateRule() {
   }
 }
 
+void applyApiCommand() {
+  switch (ApiLink::pollCommand()) {
+    case ApiLink::Command::OPEN:
+      barrier.requestOpen();
+      break;
+    case ApiLink::Command::CLOSE:
+      barrier.requestClose();  // the barrier still reopens if a car is under it
+      break;
+    case ApiLink::Command::NONE:
+      break;
+  }
+}
+
 float roundTo1Decimal(float x) { return roundf(x * 10.0f) / 10.0f; }
 
-// Builds the report in the exact format the API expects (docs/contracts/).
+// Builds the report in the exact format the API expects (docs/contracts/) and hands it
+// to ApiLink, which POSTs it in the background.
 void sendReport(const char* reason) {
   JsonDocument doc;
   doc["device_id"] = cfg::DEVICE_ID;
@@ -102,9 +117,13 @@ void sendReport(const char* reason) {
   doc["gate_car_detected"] = gateCar.state();
   doc["barrier_state"] = barrier.stateName();
 
-  Serial.printf("[report:%s] ", reason);
-  serializeJson(doc, Serial);
-  Serial.println();
+  char json[cfg::REPORT_MAX_LEN];
+  serializeJson(doc, json, sizeof(json));
+  ApiLink::submit(json);
+
+  if (strcmp(reason, "heartbeat") != 0) {  // heartbeats are too frequent to print
+    Serial.printf("[report:%s] %s\n", reason, json);
+  }
 }
 
 }  // namespace
@@ -129,6 +148,7 @@ void setup() {
   gateCar = Debouncer(cfg::GATE_DEBOUNCE_COUNT);
 
   barrier.begin(cfg::SERVO_PIN);
+  ApiLink::begin();
   Serial.printf("Ready: %u spots, sensor cycle %lu ms\n", (unsigned)cfg::SPOT_COUNT,
                 (unsigned long)(cfg::SENSOR_TICK_MS * (cfg::SPOT_COUNT + 1)));
 }
@@ -143,11 +163,16 @@ void loop() {
     nextSensor = (nextSensor + 1) % (cfg::SPOT_COUNT + 1);
   }
 
-  // 2. Barrier: local rule, then move the servo a step if needed
+  // 2. Barrier: API command, local rule, then move the servo a step if needed
+  applyApiCommand();
   applyGateRule();
   barrier.update(now, gateCar.state());
+  if (barrier.state() != lastReportedBarrier) {  // tell the API (and dashboard) right away
+    lastReportedBarrier = barrier.state();
+    reportPending = true;
+  }
 
-  // 3. Report: immediately on a change, otherwise a heartbeat every 5 s
+  // 3. Report: immediately on a change, otherwise a heartbeat every 2 s
   if (reportPending || now - lastReportMs >= cfg::HEARTBEAT_MS) {
     sendReport(reportPending ? "change" : "heartbeat");
     reportPending = false;

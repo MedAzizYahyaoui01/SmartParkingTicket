@@ -149,7 +149,7 @@ Wokwi doesn't need one.
    ```
    If the parking is full, the barrier stays closed and the serial monitor says so.
 5. **Report** in the API's JSON format (`docs/contracts/sensor-reading.schema.json`):
-   immediately on any change, plus a heartbeat every 5 s. In this step it is printed on the
+   immediately on any change, plus a heartbeat every 5 s (2 s from Step 4). In this step it is printed on the
    serial monitor; in Step 4 the same JSON is sent to the API over Wi-Fi.
 
 Everything is scheduled with `millis()` â€” there is no `delay()` in the code. The only waits are
@@ -283,3 +283,99 @@ container for it.
 2. Start the API (`uvicorn app.main:app --reload` in `backend/`), then the simulator.
 3. Watch the data arrive live in the Firebase console â†’ Realtime Database, and in
    mongo-express (<http://localhost:8081>).
+
+## Step 4 — Wokwi → API link
+
+**Goal:** the simulated ESP32 sends its reports to the real API over Wi-Fi and obeys the
+barrier command in the reply. End-to-end demo: move a slider in Wokwi, the spot turns
+`occupied` in Firebase and an event appears in MongoDB.
+
+### How it works
+
+```
+Wokwi ESP32 ──Wi-Fi "Wokwi-GUEST"──▶ Wokwi gateway (built into the VS Code extension)
+            ──▶ http://host.wokwi.internal:8000 = the API running on this PC
+```
+
+The VS Code extension includes Wokwi's *Private IoT Gateway*: the simulated ESP32 reaches
+the computer running VS Code under the name `host.wokwi.internal`.
+
+| File | Role |
+|---|---|
+| `include/ApiLink.h`, `src/ApiLink.cpp` | Wi-Fi connection and `POST /api/v1/sensors/reading`, in a separate FreeRTOS task |
+| `include/secrets.example.h` | Wi-Fi name, API URL and API key (defaults for Wokwi) |
+| `include/secrets.h` | Your own copy, **git-ignored**. Used instead of the example when it exists |
+
+**Why a separate task?** An HTTP request takes 100 ms to over 1 s (the API waits on
+Firebase). If `loop()` made the call, sensing and the servo would freeze for that long.
+`ApiLink` runs on core 0, where the Wi-Fi stack already lives, and `loop()` stays on core 1:
+
+```
+loop()  ──submit(json)──▶  [report slot: latest only] ──▶ api_link task: POST
+loop()  ◀─pollCommand()──  [command queue]            ◀── barrier_command in the reply
+```
+
+- **Latest report only.** Every report carries the full state, so when a newer one is ready
+  before the previous one was sent, the old one is replaced (`xQueueOverwrite`).
+- **Network down = no harm.** The LEDs and the local gate rule keep working. Reports are
+  dropped while Wi-Fi or the API is down, and the next heartbeat brings the API up to date.
+  Wi-Fi reconnects on its own.
+- **Barrier commands.** The reply's `barrier_command` (`open`/`close`) is passed back to
+  `loop()`, which calls the barrier state machine. Its safety rule still applies: a `close`
+  never comes down on a car.
+- **Heartbeat lowered from 5 s to 2 s.** Dashboard commands reach the ESP32 in the reply to
+  its next report, so this is the worst-case delay for a manual open/close.
+- **Barrier changes are reported right away** (opening, open, closing, closed), so Firebase
+  always shows the real barrier position.
+- `https://` URLs work too (for the tunnel fallback below); the certificate is not checked.
+
+### Run it
+
+1. **Set the API key.** Copy `firmware/include/secrets.example.h` to
+   `firmware/include/secrets.h` and set `API_KEY` to the value of `API_KEY` in `.env`.
+2. **Start MongoDB** in the VM (`docker compose up -d mongo mongo-express`), then the API
+   on Windows:
+
+   ```powershell
+   conda activate smart-parking
+   cd backend
+   uvicorn app.main:app --port 8000
+   ```
+3. **Build** the firmware (`pio run` in `firmware/`) and start the simulator
+   (`F1` → **Wokwi: Start Simulator**).
+4. Expected serial output:
+
+   ```
+   [wifi] connecting to Wokwi-GUEST...
+   [wifi] connected, IP 10.13.37.2
+   [api] 200 in 240 ms -> command none, 4 free
+   [spot] P1 -> occupied (23.0 cm), 3/4 free
+   [report:change] {"device_id":"esp32-parking-01","spots":[...],...}
+   [api] 200 in 210 ms -> command none, 3 free
+   ```
+   and in the API terminal: `POST /api/v1/sensors/reading HTTP/1.1" 200`.
+5. **Check end to end:**
+   - Firebase console → Realtime Database: `parking/spots/P1/status` = `occupied`,
+     `parking/device/online` = `true`.
+   - mongo-express (<http://localhost:8081>) → `occupancy_events`: a new event for P1.
+   - Manual command: `POST /api/v1/barrier/command` with `{"action": "open"}` from
+     <http://localhost:8000/docs>. Within 2 s the servo opens in Wokwi and the serial
+     monitor shows `command open`. It closes again 5 s later (no car at the gate).
+   - Stop the simulator: after 15 s `parking/device/online` turns `false`.
+
+### Troubleshooting
+
+| Serial monitor shows | Cause / fix |
+|---|---|
+| `[api] HTTP 401` | `API_KEY` in `secrets.h` differs from `.env` |
+| `[api] HTTP 422: ...` | Report doesn't match the contract (the reply says which field) |
+| `[api] unreachable (connection refused)` | API not running, or not on port 8000. Try `uvicorn ... --host 0.0.0.0` and allow it in the Windows firewall |
+| `[api] unreachable (...)` with the API running | The gateway can't reach the PC: use the tunnel fallback |
+| Stays on `connecting to Wokwi-GUEST...` | Simulator not started from VS Code, or the Wokwi license is not active |
+
+### Fallbacks
+
+- **Tunnel:** run `cloudflared tunnel --url http://localhost:8000` (or `ngrok http 8000`) and
+  set `API_URL` in `secrets.h` to `https://<tunnel-host>/api/v1/sensors/reading`.
+- **No Wokwi at all:** `python tools/esp32_simulator.py --api-key <API_KEY>` sends the same
+  JSON (Step 3).

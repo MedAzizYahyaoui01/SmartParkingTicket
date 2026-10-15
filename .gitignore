@@ -33,3 +33,4 @@ firmware/.vscode/
 .idea/
 Thumbs.db
 .DS_Store
+firmware/include/secrets.h
