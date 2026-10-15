@@ -2,6 +2,13 @@
 
 #include <Arduino.h>
 
+// Wi-Fi + API settings: secrets.h (git-ignored) if present, otherwise the example defaults.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#include "secrets.example.h"
+#endif
+
 // All pins, thresholds and timings in one place.
 namespace cfg {
 
@@ -39,8 +46,12 @@ constexpr uint32_t SENSOR_TICK_MS = 100;
 constexpr uint32_t ECHO_TIMEOUT_US = 25000;  // ~4.3 m, beyond the HC-SR04 range
 constexpr float NO_ECHO_CM = 400.0f;         // value used when no echo comes back
 
-// Reporting
-constexpr uint32_t HEARTBEAT_MS = 5000;
+// Reporting. The heartbeat is also how the ESP32 picks up dashboard commands (they come
+// back in the API's reply), so it is kept short. The API marks the device offline after 15 s.
+constexpr uint32_t HEARTBEAT_MS = 2000;
+constexpr size_t REPORT_MAX_LEN = 512;      // the 4-spot report is ~330 bytes
+constexpr uint32_t HTTP_TIMEOUT_MS = 3000;  // give up on a request after 3 s
+constexpr uint32_t API_TASK_STACK = 12288;  // enough for HTTPClient + TLS (tunnel fallback)
 
 // Barrier (servo)
 constexpr int SERVO_CLOSED_DEG = 0;

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "Smart Parking API"
-    app_version: str = "0.2.0"
+    app_version: str = "0.3.0"
 
     # MongoDB (occupancy history)
     mongo_uri: str = "mongodb://localhost:27017"
@@ -28,12 +28,19 @@ class Settings(BaseSettings):
     api_key: str = "change-me"
 
     # Comma-separated list of origins allowed to call the API from a browser
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # Parking layout and timings
     spot_ids: list[str] = ["P1", "P2", "P3", "P4"]
     device_offline_after_s: int = 15
     snapshot_interval_s: int = 60
+
+    # Reservations (simulated): a reserved spot is held for this long, then released
+    reservation_default_min: int = 15
+    reservation_max_min: int = 60
+
+    # Time zone of the parking: statistics are grouped by *local* hour and weekday
+    timezone: str = "UTC"
 
     @property
     def cors_origin_list(self) -> list[str]:

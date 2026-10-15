@@ -149,7 +149,7 @@ Wokwi doesn't need one.
    ```
    If the parking is full, the barrier stays closed and the serial monitor says so.
 5. **Report** in the API's JSON format (`docs/contracts/sensor-reading.schema.json`):
-   immediately on any change, plus a heartbeat every 5 s. In this step it is printed on the
+   immediately on any change, plus a heartbeat every 5 s (2 s from Step 4). In this step it is printed on the
    serial monitor; in Step 4 the same JSON is sent to the API over Wi-Fi.
 
 Everything is scheduled with `millis()` â€” there is no `delay()` in the code. The only waits are
@@ -283,3 +283,207 @@ container for it.
 2. Start the API (`uvicorn app.main:app --reload` in `backend/`), then the simulator.
 3. Watch the data arrive live in the Firebase console â†’ Realtime Database, and in
    mongo-express (<http://localhost:8081>).
+
+## Step 4 — Wokwi → API link
+
+**Goal:** the simulated ESP32 sends its reports to the real API over Wi-Fi and obeys the
+barrier command in the reply. End-to-end demo: move a slider in Wokwi, the spot turns
+`occupied` in Firebase and an event appears in MongoDB.
+
+### How it works
+
+```
+Wokwi ESP32 ──Wi-Fi "Wokwi-GUEST"──▶ Wokwi gateway (built into the VS Code extension)
+            ──▶ http://host.wokwi.internal:8000 = the API running on this PC
+```
+
+The VS Code extension includes Wokwi's *Private IoT Gateway*: the simulated ESP32 reaches
+the computer running VS Code under the name `host.wokwi.internal`.
+
+| File | Role |
+|---|---|
+| `include/ApiLink.h`, `src/ApiLink.cpp` | Wi-Fi connection and `POST /api/v1/sensors/reading`, in a separate FreeRTOS task |
+| `include/secrets.example.h` | Wi-Fi name, API URL and API key (defaults for Wokwi) |
+| `include/secrets.h` | Your own copy, **git-ignored**. Used instead of the example when it exists |
+
+**Why a separate task?** An HTTP request takes 100 ms to over 1 s (the API waits on
+Firebase). If `loop()` made the call, sensing and the servo would freeze for that long.
+`ApiLink` runs on core 0, where the Wi-Fi stack already lives, and `loop()` stays on core 1:
+
+```
+loop()  ──submit(json)──▶  [report slot: latest only] ──▶ api_link task: POST
+loop()  ◀─pollCommand()──  [command queue]            ◀── barrier_command in the reply
+```
+
+- **Latest report only.** Every report carries the full state, so when a newer one is ready
+  before the previous one was sent, the old one is replaced (`xQueueOverwrite`).
+- **Network down = no harm.** The LEDs and the local gate rule keep working. Reports are
+  dropped while Wi-Fi or the API is down, and the next heartbeat brings the API up to date.
+  Wi-Fi reconnects on its own.
+- **Barrier commands.** The reply's `barrier_command` (`open`/`close`) is passed back to
+  `loop()`, which calls the barrier state machine. Its safety rule still applies: a `close`
+  never comes down on a car.
+- **Heartbeat lowered from 5 s to 2 s.** Dashboard commands reach the ESP32 in the reply to
+  its next report, so this is the worst-case delay for a manual open/close.
+- **Barrier changes are reported right away** (opening, open, closing, closed), so Firebase
+  always shows the real barrier position.
+- `https://` URLs work too (for the tunnel fallback below); the certificate is not checked.
+
+### Run it
+
+1. **Set the API key.** Copy `firmware/include/secrets.example.h` to
+   `firmware/include/secrets.h` and set `API_KEY` to the value of `API_KEY` in `.env`.
+2. **Start MongoDB** in the VM (`docker compose up -d mongo mongo-express`), then the API
+   on Windows:
+
+   ```powershell
+   conda activate smart-parking
+   cd backend
+   uvicorn app.main:app --port 8000
+   ```
+3. **Build** the firmware (`pio run` in `firmware/`) and start the simulator
+   (`F1` → **Wokwi: Start Simulator**).
+4. Expected serial output:
+
+   ```
+   [wifi] connecting to Wokwi-GUEST...
+   [wifi] connected, IP 10.13.37.2
+   [api] 200 in 240 ms -> command none, 4 free
+   [spot] P1 -> occupied (23.0 cm), 3/4 free
+   [report:change] {"device_id":"esp32-parking-01","spots":[...],...}
+   [api] 200 in 210 ms -> command none, 3 free
+   ```
+   and in the API terminal: `POST /api/v1/sensors/reading HTTP/1.1" 200`.
+5. **Check end to end:**
+   - Firebase console → Realtime Database: `parking/spots/P1/status` = `occupied`,
+     `parking/device/online` = `true`.
+   - mongo-express (<http://localhost:8081>) → `occupancy_events`: a new event for P1.
+   - Manual command: `POST /api/v1/barrier/command` with `{"action": "open"}` from
+     <http://localhost:8000/docs>. Within 2 s the servo opens in Wokwi and the serial
+     monitor shows `command open`. It closes again 5 s later (no car at the gate).
+   - Stop the simulator: after 15 s `parking/device/online` turns `false`.
+
+### Troubleshooting
+
+| Serial monitor shows | Cause / fix |
+|---|---|
+| `[api] HTTP 401` | `API_KEY` in `secrets.h` differs from `.env` |
+| `[api] HTTP 422: ...` | Report doesn't match the contract (the reply says which field) |
+| `[api] unreachable (connection refused)` | API not running, or not on port 8000. Try `uvicorn ... --host 0.0.0.0` and allow it in the Windows firewall |
+| `[api] unreachable (...)` with the API running | The gateway can't reach the PC: use the tunnel fallback |
+| Stays on `connecting to Wokwi-GUEST...` | Simulator not started from VS Code, or the Wokwi license is not active |
+
+### Fallbacks
+
+- **Tunnel:** run `cloudflared tunnel --url http://localhost:8000` (or `ngrok http 8000`) and
+  set `API_URL` in `secrets.h` to `https://<tunnel-host>/api/v1/sensors/reading`.
+- **No Wokwi at all:** `python tools/esp32_simulator.py --api-key <API_KEY>` sends the same
+  JSON (Step 3).
+
+## Step 5 — Dashboard, reservations and statistics
+
+**Goal:** a React dashboard that shows the parking live, controls the barrier, books spots
+and shows statistics computed from the MongoDB history.
+
+### New API endpoints
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/v1/reservations` | Active reservations |
+| POST | `/api/v1/reservations` | `{"name", "spot_id", "duration_min"}` → 201, or **409** if the spot is occupied / already reserved |
+| DELETE | `/api/v1/reservations/{id}` | Cancel → 204, or 404 |
+| GET | `/api/v1/stats/occupancy?from&to&step` | Average occupancy rate per bucket of `step` minutes |
+| GET | `/api/v1/stats/summary?from&to` | Average occupancy, entries, average parking time, peak hours, weekday × hour heatmap |
+
+`from`/`to` are ISO dates (default: the last 24 h). A date without a time zone is read in
+the parking's time zone (`TIMEZONE` in `.env`, e.g. `Africa/Tunis`); statistics are grouped
+by **local** hour and weekday.
+
+### Reservation rules (`services/parking.py`)
+
+- The sensors give the *physical* status (free/occupied). A free spot with an active
+  reservation is shown **reserved** (orange) and no longer counts as free — so the barrier
+  doesn't open for it automatically.
+- A spot can't be reserved twice, nor while occupied or before its state is known (409).
+- A reservation ends in one of three ways, logged in MongoDB (`reservations` collection):
+  **fulfilled** (a car parks on the spot), **cancelled** (dashboard), **expired** (a
+  background task checks every 5 s).
+- Active reservations live in Firebase (`reservations/{id}`), so the dashboard shows them
+  live, and the API reloads them after a restart.
+
+### Statistics (`services/stats.py`, `repositories/history.py`)
+
+The heavy lifting is done by MongoDB **aggregation pipelines** on the time-series collection:
+`$dateTrunc` (buckets of N minutes, aligned on local time) and `$isoDayOfWeek` / `$hour`
+with a time zone (heatmap). The in-memory twin computes the same results in Python, and an
+integration test checks both agree on a real MongoDB.
+
+Entries and average parking time come from `occupancy_events`: each arrival on a spot is
+paired with the next departure. Stays that started before the period, or haven't ended,
+are left out instead of being guessed.
+
+### Synthetic history (`tools/seed_history.py`)
+
+A live demo only has minutes of data. This script simulates the 4 spots minute by minute
+over the past N days (quiet nights, a morning peak, a lunch rush, calmer weekends; average
+stays of 45–90 min) and writes exactly what the API would have written. Every document is
+tagged `synthetic: true`, and the data stops where real data begins, so the two never mix.
+
+```powershell
+python tools/seed_history.py --days 28     # re-running replaces the previous synthetic data
+python tools/seed_history.py --clear       # remove it
+```
+
+### Dashboard (`frontend/`)
+
+React 18 + Vite, React Router, Tailwind CSS, Recharts, Firebase JS SDK.
+
+| Page | Content |
+|---|---|
+| **Live map** | SVG plan: green = free, red = occupied, orange = reserved, grey = no signal (always with a text label). "3 / 4 free" counter. Barrier position (animated) and Open / Close buttons. Click a free spot → reservation dialog. |
+| **Reservations** | Booking form (name, spot, duration) and the active reservations with a live countdown and Cancel. |
+| **Statistics** | Period (24 h / 7 days / 30 days), key figures, occupancy curve, average by hour, weekday × hour heatmap, and the hourly values as a table. |
+
+How the data flows:
+
+```
+Live state:  Firebase ──onValue (push, no polling)──▶ dashboard
+Actions:     dashboard ──REST──▶ API ──▶ Firebase + MongoDB
+Statistics:  dashboard ──REST──▶ API ──aggregation──▶ MongoDB
+```
+
+- One Firebase subscription for the whole app (`lib/live.jsx`), shared through a React
+  context. Firebase is read-only for the browser and needs only the database URL.
+- **Fallback:** with `VITE_FIREBASE_DATABASE_URL` empty, the same data is polled from the
+  API every 2 s, so the dashboard works without Firebase.
+- The header shows "Sensors online/offline". It also turns offline if `last_seen` is older
+  than 20 s, in case the API itself stopped (Firebase would otherwise keep the last value).
+- A toast appears when the barrier opens; the occupancy curve leaves a gap where there is
+  no data instead of drawing a line across it.
+
+Also fixed in this step: the ESP32 simulator froze when the parking was full and a car was
+waiting at the gate (no car could leave any more).
+
+### Run it
+
+1. **Publish the Firebase security rules** (once): Firebase console → Realtime Database →
+   *Rules*, paste the content of `firebase/database.rules.json`, click **Publish**.
+   Without it the dashboard shows `permission_denied`.
+2. `.env` (repo root) needs `TIMEZONE`, `VITE_API_URL` and `VITE_FIREBASE_DATABASE_URL`
+   (see `.env.example`).
+3. Start MongoDB (VM) and the API (`uvicorn app.main:app --port 8000` in `backend/`).
+4. Seed the history once: `python tools/seed_history.py --days 28`
+5. Start the dashboard:
+
+   ```powershell
+   cd frontend
+   npm install
+   npm run dev          # http://localhost:5173
+   ```
+6. Start Wokwi (or `python tools/esp32_simulator.py --api-key <API_KEY> --speed 0.3`).
+
+### Tests (75, coverage 90%)
+
+New: `test_reservations.py` (rules + 409/404/422), `test_stats.py` (buckets, local time,
+peak hours, parking time, parameter validation), and a MongoDB integration test of the
+aggregation pipelines and the reservation log. CI now also builds the dashboard.

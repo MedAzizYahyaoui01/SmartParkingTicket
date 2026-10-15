@@ -6,11 +6,16 @@ This is the only place that decides what is written where:
 
 A failing database never makes a sensor reading fail: the ESP32 must always get its barrier
 command back, so write errors are logged and the request carries on.
+
+Spot status: the sensors give the *physical* status (free / occupied). A free spot with an
+active reservation is shown as "reserved" and no longer counts as free (so the barrier
+doesn't open for it). A car parking on a reserved spot fulfils the reservation.
 """
 
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +31,7 @@ from app.schemas.parking import (
     SpotOut,
     SummaryOut,
 )
+from app.schemas.reservations import ReservationOut
 from app.schemas.sensors import SensorReading, SensorResponse
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,34 @@ class SpotState:
             "distance_cm": self.distance_cm,
             "updated_at": int(self.updated_at) if self.updated_at else None,
         }
+
+
+@dataclass
+class Reservation:
+    id: str
+    spot_id: str
+    name: str
+    created_at: float
+    expires_at: float
+
+    def to_firebase(self) -> dict[str, Any]:
+        return {
+            "spot_id": self.spot_id,
+            "name": self.name,
+            "created_at": int(self.created_at),
+            "expires_at": int(self.expires_at),
+        }
+
+    def out(self, status: str = "active") -> ReservationOut:
+        return ReservationOut(id=self.id, status=status, **self.to_firebase())
+
+
+class SpotUnavailableError(Exception):
+    """The spot can't be reserved (occupied, already reserved, or state unknown)."""
+
+
+class ReservationNotFoundError(Exception):
+    """No active reservation with this ID."""
 
 
 @dataclass
@@ -73,6 +107,7 @@ class ParkingService:
         self.barrier_state = "closed"
         self.gate_car = False
         self.pending_command: PendingCommand | None = None
+        self.reservations: dict[str, Reservation] = {}  # active ones only
         self._last_command_source = "device"  # who caused the next barrier movement
         self._lock = asyncio.Lock()
 
@@ -90,12 +125,25 @@ class ParkingService:
             saved = None
         for spot_id, data in (saved or {}).items():
             if spot_id in self.spots and isinstance(data, dict):
-                if data.get("status") in ("free", "occupied"):
+                if data.get("status") in ("free", "occupied", "reserved"):
                     self.spots[spot_id] = SpotState(
-                        status=data["status"],
+                        # "reserved" is a free spot; the reservation itself is restored below
+                        status="occupied" if data["status"] == "occupied" else "free",
                         distance_cm=data.get("distance_cm"),
                         updated_at=data.get("updated_at"),
                     )
+
+        try:
+            saved = await asyncio.to_thread(self.store.get, "reservations")
+        except Exception:
+            logger.exception("Could not read the saved reservations")
+            saved = None
+        for res_id, data in (saved or {}).items():
+            try:
+                self.reservations[res_id] = Reservation(id=res_id, **data)
+            except TypeError:
+                logger.warning("Ignoring malformed reservation %s in Firebase", res_id)
+        # (Reservations that expired while the API was down end at the next expiry check.)
 
         # The device is offline until it reports again.
         await self._write(
@@ -111,6 +159,7 @@ class ParkingService:
 
             # 1. Change detection: only a real change becomes a history event.
             events = []
+            fulfilled: list[Reservation] = []
             for r in reading.spots:
                 spot = self.spots[r.spot_id]
                 new_status = "occupied" if r.occupied else "free"
@@ -127,6 +176,11 @@ class ParkingService:
                     spot.status = new_status
                     spot.updated_at = now
                 spot.distance_cm = r.distance_cm
+                # A car parked on a reserved spot: the reservation is used.
+                res = self._reservation_for(r.spot_id)
+                if res and r.occupied:
+                    del self.reservations[res.id]
+                    fulfilled.append(res)
 
             # The barrier started opening (or closing) if it went from the closed side to the
             # open side (or back). "opening"/"open" both count, in case a step is skipped.
@@ -144,10 +198,12 @@ class ParkingService:
 
             # 3. Current state -> Firebase, in a single multi-path update.
             updates: dict[str, Any] = {
-                f"parking/spots/{sid}": s.to_firebase()
+                f"parking/spots/{sid}": self._spot_firebase(sid)
                 for sid, s in self.spots.items()
                 if s.status != "unknown"
             }
+            for res in fulfilled:
+                updates[f"reservations/{res.id}"] = None
             updates["parking/summary"] = self.summary().model_dump()
             updates["parking/device"] = {
                 "online": True,
@@ -173,6 +229,8 @@ class ParkingService:
                     },
                 )
                 self._last_command_source = "device"
+            for res in fulfilled:
+                await self._record(self.history.end_reservation, res.id, "fulfilled", ts)
 
             return SensorResponse(barrier_command=command, free_spots=self.free_count())
 
@@ -216,7 +274,7 @@ class ParkingService:
             spots=[
                 SpotOut(
                     spot_id=sid,
-                    status=s.status,
+                    status=self._effective_status(sid),
                     distance_cm=s.distance_cm,
                     updated_at=int(s.updated_at) if s.updated_at else None,
                 )
@@ -230,6 +288,84 @@ class ParkingService:
             barrier_state=self.barrier_state,
             gate_car_detected=self.gate_car,
         )
+
+    # ------------------------------------------------------------------ reservations
+
+    async def create_reservation(
+        self, spot_id: str, name: str, duration_min: int | None = None
+    ) -> ReservationOut:
+        duration_min = duration_min or self.settings.reservation_default_min
+        if duration_min > self.settings.reservation_max_min:
+            raise ValueError(f"duration_min must be at most {self.settings.reservation_max_min}")
+        async with self._lock:
+            if self._reservation_for(spot_id):
+                raise SpotUnavailableError(f"{spot_id} is already reserved")
+            status = self.spots[spot_id].status
+            if status != "free":
+                raise SpotUnavailableError(f"{spot_id} is {status}")
+
+            now = self.clock()
+            res = Reservation(
+                id=uuid.uuid4().hex[:12],
+                spot_id=spot_id,
+                name=name.strip(),
+                created_at=now,
+                expires_at=now + duration_min * 60,
+            )
+            self.reservations[res.id] = res
+            await self._write(
+                {
+                    f"reservations/{res.id}": res.to_firebase(),
+                    f"parking/spots/{spot_id}": self._spot_firebase(spot_id),
+                    "parking/summary": self.summary().model_dump(),
+                }
+            )
+            await self._record(
+                self.history.insert_reservation,
+                {
+                    "_id": res.id,
+                    "spot_id": spot_id,
+                    "name": res.name,
+                    "created_at": _utc(res.created_at),
+                    "expires_at": _utc(res.expires_at),
+                    "status": "active",
+                },
+            )
+            return res.out()
+
+    async def cancel_reservation(self, reservation_id: str) -> None:
+        async with self._lock:
+            res = self.reservations.get(reservation_id)
+            if res is None:
+                raise ReservationNotFoundError(reservation_id)
+            await self._end_reservation(res, "cancelled")
+
+    async def expire_reservations(self) -> list[str]:
+        """Releases the reservations whose time is up. Returns their IDs."""
+        async with self._lock:
+            now = self.clock()
+            expired = [r for r in self.reservations.values() if r.expires_at <= now]
+            for res in expired:
+                await self._end_reservation(res, "expired")
+            return [r.id for r in expired]
+
+    def list_reservations(self) -> list[ReservationOut]:
+        return [r.out() for r in sorted(self.reservations.values(), key=lambda r: r.created_at)]
+
+    async def _end_reservation(self, res: Reservation, status: str) -> None:
+        """Must be called with the lock held."""
+        del self.reservations[res.id]
+        await self._write(
+            {
+                f"reservations/{res.id}": None,
+                f"parking/spots/{res.spot_id}": self._spot_firebase(res.spot_id),
+                "parking/summary": self.summary().model_dump(),
+            }
+        )
+        await self._record(self.history.end_reservation, res.id, status, _utc(self.clock()))
+
+    def _reservation_for(self, spot_id: str) -> Reservation | None:
+        return next((r for r in self.reservations.values() if r.spot_id == spot_id), None)
 
     # ------------------------------------------------------------------ background tasks
 
@@ -270,12 +406,23 @@ class ParkingService:
 
     # ------------------------------------------------------------------ helpers
 
+    def _effective_status(self, spot_id: str) -> str:
+        """Physical status, except that a free spot with a reservation shows "reserved"."""
+        status = self.spots[spot_id].status
+        if status == "free" and self._reservation_for(spot_id):
+            return "reserved"
+        return status
+
+    def _spot_firebase(self, spot_id: str) -> dict[str, Any]:
+        return {**self.spots[spot_id].to_firebase(), "status": self._effective_status(spot_id)}
+
     def free_count(self) -> int:
-        return sum(1 for s in self.spots.values() if s.status == "free")
+        return sum(1 for sid in self.spots if self._effective_status(sid) == "free")
 
     def summary(self) -> SummaryOut:
-        occupied = sum(1 for s in self.spots.values() if s.status == "occupied")
-        reserved = sum(1 for s in self.spots.values() if s.status == "reserved")
+        statuses = [self._effective_status(sid) for sid in self.spots]
+        occupied = statuses.count("occupied")
+        reserved = statuses.count("reserved")
         return SummaryOut(
             free=self.free_count(), occupied=occupied, reserved=reserved, total=len(self.spots)
         )
