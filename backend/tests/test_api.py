@@ -12,7 +12,11 @@ def test_valid_reading_returns_barrier_command(client, auth):
     response = client.post(READING_URL, json=make_reading(gate=True), headers=auth)
 
     assert response.status_code == 200
-    assert response.json() == {"barrier_command": "open", "free_spots": 4}
+    assert response.json() == {
+        "barrier_command": "open",
+        "free_spots": 4,
+        "gate_mode": "auto",
+    }
 
 
 def test_reading_without_api_key_is_rejected(client):

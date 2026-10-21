@@ -75,8 +75,10 @@ void readSensor(size_t index) {
 // Local gate rule: a car is waiting and there is room -> open.
 // It works without the network; the API applies the same rule and can also send
 // manual open/close commands from the dashboard (see applyApiCommand).
+// In "account" mode the API alone opens the barrier, for identified users with credit.
 void applyGateRule() {
   if (!gateCar.state() || barrier.state() != Barrier::State::CLOSED) return;
+  if (ApiLink::apiControlsGate()) return;
 
   if (freeSpotCount() > 0) {
     barrier.requestOpen();

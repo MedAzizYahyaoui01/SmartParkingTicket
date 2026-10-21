@@ -3,11 +3,12 @@ import { useState } from 'react'
 import ReservationForm from '../components/ReservationForm'
 import { Button, Card } from '../components/ui'
 import { api } from '../lib/api'
+import { useAuth } from '../lib/auth'
 import { countdown, SPOT_IDS } from '../lib/format'
 import { useLive, useNow } from '../lib/live'
 import { useToast } from '../lib/toast'
 
-function ReservationRow({ reservation, now }) {
+function ReservationRow({ reservation, now, mine, onCancelled }) {
   const toast = useToast()
   const [busy, setBusy] = useState(false)
   const left = reservation.expires_at - now
@@ -18,7 +19,8 @@ function ReservationRow({ reservation, now }) {
     setBusy(true)
     try {
       await api.cancelReservation(reservation.id)
-      toast(`Reservation of ${reservation.spot_id} cancelled`, 'info')
+      toast(`Reservation of ${reservation.spot_id} cancelled, fee refunded`, 'info')
+      onCancelled?.()
     } catch (err) {
       toast(`Cancel failed: ${err.message}`, 'error')
       setBusy(false)
@@ -41,9 +43,11 @@ function ReservationRow({ reservation, now }) {
           <span className="text-lg font-semibold tabular-nums" aria-label="Time left">
             {countdown(left)}
           </span>
-          <Button variant="danger" onClick={cancel} disabled={busy}>
-            Cancel
-          </Button>
+          {mine && (
+            <Button variant="danger" onClick={cancel} disabled={busy}>
+              Cancel
+            </Button>
+          )}
         </div>
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink/5" aria-hidden>
@@ -55,6 +59,7 @@ function ReservationRow({ reservation, now }) {
 
 export default function ReservationsPage() {
   const { spots, reservations } = useLive()
+  const { user, refresh } = useAuth()
   const now = useNow()
   const freeSpots = SPOT_IDS.filter((id) => spots[id]?.status === 'free')
   const list = Object.entries(reservations)
@@ -70,7 +75,7 @@ export default function ReservationsPage() {
           <ReservationForm freeSpots={freeSpots} />
         )}
         <p className="mt-4 text-xs text-muted">
-          Simulated booking: the spot is held (orange on the map) until the driver parks on it or the time runs out.
+          The spot is held (orange on the map) until you park on it or the time runs out. Cancelling refunds the fee.
         </p>
       </Card>
 
@@ -80,7 +85,13 @@ export default function ReservationsPage() {
         ) : (
           <ul className="divide-y divide-line">
             {list.map((r) => (
-              <ReservationRow key={r.id} reservation={r} now={now} />
+              <ReservationRow
+                key={r.id}
+                reservation={r}
+                now={now}
+                mine={user?.reservation?.id === r.id}
+                onCancelled={refresh}
+              />
             ))}
           </ul>
         )}

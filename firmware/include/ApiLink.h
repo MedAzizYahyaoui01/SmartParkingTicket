@@ -24,4 +24,9 @@ void submit(const char* json);
 // Next barrier command received from the API, or NONE. Never blocks.
 Command pollCommand();
 
+// True while the API runs the gate in "account" mode (only identified, paying users get in):
+// the local "free spot -> open" rule must then stay off. Turns false again if the API has
+// not answered for API_GATE_TAKEOVER_MS, so a network failure never locks the parking.
+bool apiControlsGate();
+
 }  // namespace ApiLink

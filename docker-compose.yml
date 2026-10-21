@@ -40,6 +40,9 @@ services:
       MONGO_DB: ${MONGO_DB}
       API_KEY: ${API_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      GATE_MODE: ${GATE_MODE:-account}
+      JWT_SECRET: ${JWT_SECRET}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       FIREBASE_DATABASE_URL: ${FIREBASE_DATABASE_URL}
       FIREBASE_CREDENTIALS: /run/secrets/firebase-service-account.json
     volumes:

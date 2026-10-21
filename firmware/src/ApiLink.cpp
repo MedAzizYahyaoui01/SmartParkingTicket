@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 
+#include <atomic>
+
 #include "config.h"
 
 namespace ApiLink {
@@ -17,6 +19,10 @@ struct Report {
 
 QueueHandle_t reportSlot;    // length 1, overwritten: only the latest report is kept
 QueueHandle_t commandQueue;  // commands from the API, applied by loop()
+
+// Gate mode from the last reply: written by the API task (core 0), read by loop() (core 1)
+std::atomic<bool> accountMode{false};
+std::atomic<uint32_t> accountModeSeenMs{0};
 
 bool isHttps() { return strncmp(secrets::API_URL, "https://", 8) == 0; }
 
@@ -43,8 +49,13 @@ void handleReply(const String& body, uint32_t elapsedMs) {
   }
   const char* command = doc["barrier_command"] | "none";
   const int freeSpots = doc["free_spots"] | -1;
-  Serial.printf("[api] 200 in %lu ms -> command %s, %d free\n", (unsigned long)elapsedMs, command,
-                freeSpots);
+  const char* gateMode = doc["gate_mode"] | "auto";
+  Serial.printf("[api] 200 in %lu ms -> command %s, %d free, gate %s\n", (unsigned long)elapsedMs,
+                command, freeSpots, gateMode);
+
+  const bool account = strcmp(gateMode, "account") == 0;
+  if (account) accountModeSeenMs = millis();
+  accountMode = account;
 
   Command c = Command::NONE;
   if (strcmp(command, "open") == 0) c = Command::OPEN;
@@ -123,6 +134,10 @@ Command pollCommand() {
   Command c = Command::NONE;
   xQueueReceive(commandQueue, &c, 0);
   return c;
+}
+
+bool apiControlsGate() {
+  return accountMode && millis() - accountModeSeenMs < cfg::API_GATE_TAKEOVER_MS;
 }
 
 }  // namespace ApiLink
