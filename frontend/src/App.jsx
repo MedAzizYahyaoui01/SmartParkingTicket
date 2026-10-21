@@ -1,19 +1,52 @@
 import { lazy, Suspense, useEffect, useRef } from 'react'
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { Link, NavLink, Route, Routes } from 'react-router-dom'
 
+import ChatWidget from './components/ChatWidget'
+import { useAuth } from './lib/auth'
+import { money } from './lib/format'
 import { useDeviceOnline, useLive } from './lib/live'
 import { useToast } from './lib/toast'
 import LivePage from './pages/LivePage'
+import LoginPage from './pages/LoginPage'
 import ReservationsPage from './pages/ReservationsPage'
 
-// Charts are only loaded when the Statistics page is opened
+// Heavy pages (charts, QR code libraries) are only loaded when opened
 const StatsPage = lazy(() => import('./pages/StatsPage'))
+const GatePage = lazy(() => import('./pages/GatePage'))
+const AccountPage = lazy(() => import('./pages/AccountPage'))
+
+const loading = <p className="text-sm text-muted">Loading…</p>
 
 const NAV = [
   { to: '/', label: 'Live map' },
   { to: '/reservations', label: 'Reservations' },
   { to: '/stats', label: 'Statistics' },
+  { to: '/gate', label: 'Gate kiosk' },
 ]
+
+function AccountLink() {
+  const { user, token } = useAuth()
+  if (!token) {
+    return (
+      <Link to="/login" className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:opacity-90">
+        Sign in
+      </Link>
+    )
+  }
+  return (
+    <Link
+      to="/account"
+      className="inline-flex items-center gap-2 rounded-full border border-line px-3 py-1 text-sm hover:bg-ink/5"
+    >
+      <span className="font-medium">{user?.name || 'Account'}</span>
+      {user && (
+        <span className={`tabular-nums ${user.balance < 0 ? 'text-occupied' : 'text-ink-2'}`}>
+          {money(user.balance, user.currency)}
+        </span>
+      )}
+    </Link>
+  )
+}
 
 function DeviceBadge() {
   const online = useDeviceOnline()
@@ -71,8 +104,9 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-2">
             <DeviceBadge />
+            <AccountLink />
           </div>
         </div>
       </header>
@@ -89,10 +123,13 @@ export default function App() {
         <Routes>
           <Route path="/" element={<LivePage />} />
           <Route path="/reservations" element={<ReservationsPage />} />
+          <Route path="/gate" element={<Suspense fallback={loading}><GatePage /></Suspense>} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/account" element={<Suspense fallback={loading}><AccountPage /></Suspense>} />
           <Route
             path="/stats"
             element={
-              <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
+              <Suspense fallback={loading}>
                 <StatsPage />
               </Suspense>
             }
@@ -103,6 +140,8 @@ export default function App() {
       <footer className="mx-auto max-w-6xl px-4 pb-6 text-xs text-muted">
         Live data source: {source}
       </footer>
+
+      <ChatWidget />
     </div>
   )
 }

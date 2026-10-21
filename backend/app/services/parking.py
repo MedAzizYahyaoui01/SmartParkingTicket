@@ -59,17 +59,28 @@ class Reservation:
     name: str
     created_at: float
     expires_at: float
+    user_id: str | None = None  # account that booked (and paid for) it
 
     def to_firebase(self) -> dict[str, Any]:
-        return {
+        data = {
             "spot_id": self.spot_id,
             "name": self.name,
             "created_at": int(self.created_at),
             "expires_at": int(self.expires_at),
         }
+        if self.user_id:
+            data["user_id"] = self.user_id
+        return data
 
     def out(self, status: str = "active") -> ReservationOut:
-        return ReservationOut(id=self.id, status=status, **self.to_firebase())
+        return ReservationOut(
+            id=self.id,
+            spot_id=self.spot_id,
+            name=self.name,
+            created_at=int(self.created_at),
+            expires_at=int(self.expires_at),
+            status=status,
+        )
 
 
 class SpotUnavailableError(Exception):
@@ -232,7 +243,11 @@ class ParkingService:
             for res in fulfilled:
                 await self._record(self.history.end_reservation, res.id, "fulfilled", ts)
 
-            return SensorResponse(barrier_command=command, free_spots=self.free_count())
+            return SensorResponse(
+                barrier_command=command,
+                free_spots=self.free_count(),
+                gate_mode=self.settings.gate_mode,
+            )
 
     def _decide_command(self, reading: SensorReading) -> tuple[str, bool]:
         """Returns (command, whether a dashboard command was just delivered)."""
@@ -243,9 +258,11 @@ class ParkingService:
             self._last_command_source = cmd.source
             return cmd.action, True
 
-        # Automatic rule: a car waits at the gate and there is a free spot.
+        # Automatic rule: a car waits at the gate and there is a free spot. In "account"
+        # mode the barrier only opens for an identified user (see GateService).
         if (
-            reading.gate_car_detected
+            self.settings.gate_mode == "auto"
+            and reading.gate_car_detected
             and reading.barrier_state in ("closed", "closing")
             and self.free_count() > 0
         ):
@@ -292,7 +309,11 @@ class ParkingService:
     # ------------------------------------------------------------------ reservations
 
     async def create_reservation(
-        self, spot_id: str, name: str, duration_min: int | None = None
+        self,
+        spot_id: str,
+        name: str,
+        duration_min: int | None = None,
+        user_id: str | None = None,
     ) -> ReservationOut:
         duration_min = duration_min or self.settings.reservation_default_min
         if duration_min > self.settings.reservation_max_min:
@@ -311,6 +332,7 @@ class ParkingService:
                 name=name.strip(),
                 created_at=now,
                 expires_at=now + duration_min * 60,
+                user_id=user_id,
             )
             self.reservations[res.id] = res
             await self._write(
@@ -326,6 +348,7 @@ class ParkingService:
                     "_id": res.id,
                     "spot_id": spot_id,
                     "name": res.name,
+                    "user_id": user_id,
                     "created_at": _utc(res.created_at),
                     "expires_at": _utc(res.expires_at),
                     "status": "active",
@@ -348,6 +371,14 @@ class ParkingService:
             for res in expired:
                 await self._end_reservation(res, "expired")
             return [r.id for r in expired]
+
+    def reservation_of_user(self, user_id: str) -> ReservationOut | None:
+        res = next((r for r in self.reservations.values() if r.user_id == user_id), None)
+        return res.out() if res else None
+
+    def reservation_owner(self, reservation_id: str) -> str | None:
+        res = self.reservations.get(reservation_id)
+        return res.user_id if res else None
 
     def list_reservations(self) -> list[ReservationOut]:
         return [r.out() for r in sorted(self.reservations.values(), key=lambda r: r.created_at)]

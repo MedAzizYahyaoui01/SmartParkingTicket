@@ -52,6 +52,9 @@ constexpr uint32_t HEARTBEAT_MS = 2000;
 constexpr size_t REPORT_MAX_LEN = 512;      // the 4-spot report is ~330 bytes
 constexpr uint32_t HTTP_TIMEOUT_MS = 3000;  // give up on a request after 3 s
 constexpr uint32_t API_TASK_STACK = 12288;  // enough for HTTPClient + TLS (tunnel fallback)
+// In "account" gate mode the API decides who enters; if it goes silent this long, the
+// ESP32 falls back to its local rule (open when a spot is free) so nobody is locked out.
+constexpr uint32_t API_GATE_TAKEOVER_MS = 10000;
 
 // Barrier (servo)
 constexpr int SERVO_CLOSED_DEG = 0;

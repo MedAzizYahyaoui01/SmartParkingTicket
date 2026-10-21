@@ -14,7 +14,7 @@ from pymongo import MongoClient
 
 from app.config import Settings
 from app.main import create_app
-from tests.conftest import API_KEY
+from tests.conftest import API_KEY, register
 
 MONGO_URI = os.environ.get("TEST_MONGO_URI")
 pytestmark = pytest.mark.skipif(not MONGO_URI, reason="TEST_MONGO_URI not set")
@@ -117,9 +117,16 @@ def test_stats_and_reservations_on_real_mongo(mongo_db_name, store):
             json=SimulatedParking().payload(),
             headers={"X-API-Key": API_KEY},
         )
-        res_id = client.post(
-            "/api/v1/reservations", json={"name": "Amine", "spot_id": "P2"}
-        ).json()["id"]
-        assert client.delete(f"/api/v1/reservations/{res_id}").status_code == 204
+        user = register(client)
+        uid = client.get("/api/v1/me", headers=user).json()["uid"]
+        db.users.update_one({"_id": uid}, {"$inc": {"balance": 5000}})
+        res_id = client.post("/api/v1/reservations", json={"spot_id": "P2"}, headers=user).json()[
+            "id"
+        ]
+        assert client.delete(f"/api/v1/reservations/{res_id}", headers=user).status_code == 204
 
     assert db.reservations.find_one({"_id": res_id})["status"] == "cancelled"
+    # The fee was paid, then refunded, and both moves are in the wallet statement
+    assert db.users.find_one({"_id": uid})["balance"] == 5000
+    kinds = [t["kind"] for t in db.wallet_transactions.find({"uid": uid}, sort=[("ts", 1)])]
+    assert kinds == ["reservation_fee", "reservation_refund"]

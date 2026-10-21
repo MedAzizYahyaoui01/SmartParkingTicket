@@ -39,3 +39,5 @@ class SensorResponse(BaseModel):
 
     barrier_command: Literal["open", "close", "none"]
     free_spots: int
+    # "account": the ESP32 must not open on its own, only on a barrier_command
+    gate_mode: Literal["auto", "account"] = "auto"

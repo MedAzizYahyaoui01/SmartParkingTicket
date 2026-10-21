@@ -15,3 +15,10 @@ export function minutes(value) {
   if (value < 60) return `${Math.round(value)} min`
   return `${Math.floor(value / 60)} h ${String(Math.round(value % 60)).padStart(2, '0')}`
 }
+
+/** Millimes -> "12.500 TND". The API never sends money as a float. */
+export function money(millimes, currency = 'TND') {
+  if (millimes == null) return '–'
+  const sign = millimes < 0 ? '−' : ''
+  return `${sign}${(Math.abs(millimes) / 1000).toFixed(3)} ${currency}`
+}

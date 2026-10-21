@@ -4,7 +4,7 @@ import pytest
 
 from app.schemas.sensors import SensorReading
 from app.services.parking import ReservationNotFoundError, SpotUnavailableError
-from tests.conftest import make_reading
+from tests.conftest import credit, make_reading, register
 
 URL = "/api/v1/reservations"
 READING_URL = "/api/v1/sensors/reading"
@@ -126,41 +126,80 @@ def api(client, auth):
     return client
 
 
-def test_post_reservation_returns_201(api):
-    response = api.post(URL, json={"name": "Amine", "spot_id": "P2"})
+@pytest.fixture
+def user(api, account_repo):
+    """A signed-in user with 5 TND in the wallet."""
+    headers = register(api)
+    credit(account_repo, headers, api, 5000)
+    return headers
+
+
+def test_post_reservation_returns_201_and_charges_the_fee(api, user, settings):
+    response = api.post(URL, json={"spot_id": "P2"}, headers=user)
 
     assert response.status_code == 201
     assert response.json()["spot_id"] == "P2"
+    assert response.json()["name"] == "Amine"  # taken from the account
     assert api.get(URL).json()[0]["id"] == response.json()["id"]
     assert api.get("/api/v1/spots").json()["spots"][1]["status"] == "reserved"
+    me = api.get("/api/v1/me", headers=user).json()
+    assert me["balance"] == 5000 - settings.reservation_fee
+    assert me["reservation"]["spot_id"] == "P2"
 
 
-def test_reserving_twice_returns_409(api):
-    api.post(URL, json={"name": "Amine", "spot_id": "P2"})
-    assert api.post(URL, json={"name": "Sara", "spot_id": "P2"}).status_code == 409
+def test_reserving_needs_a_signed_in_user(api):
+    assert api.post(URL, json={"spot_id": "P2"}).status_code == 401
 
 
-def test_reserving_an_occupied_spot_returns_409(api):
-    assert api.post(URL, json={"name": "Amine", "spot_id": "P1"}).status_code == 409
+def test_reserving_without_credit_returns_402(api):
+    broke = register(api, "broke@example.com", "Sara")
+    assert api.post(URL, json={"spot_id": "P2"}, headers=broke).status_code == 402
+    assert api.get(URL).json() == []
+
+
+def test_one_reservation_per_user(api, user):
+    api.post(URL, json={"spot_id": "P2"}, headers=user)
+    assert api.post(URL, json={"spot_id": "P3"}, headers=user).status_code == 409
+
+
+def test_reserving_a_reserved_spot_returns_409_and_refunds(api, user, account_repo):
+    other = register(api, "sara@example.com", "Sara")
+    credit(account_repo, other, api, 5000)
+    api.post(URL, json={"spot_id": "P2"}, headers=user)
+
+    assert api.post(URL, json={"spot_id": "P2"}, headers=other).status_code == 409
+    assert api.get("/api/v1/me", headers=other).json()["balance"] == 5000
+
+
+def test_reserving_an_occupied_spot_returns_409(api, user):
+    assert api.post(URL, json={"spot_id": "P1"}, headers=user).status_code == 409
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        {"name": "Amine", "spot_id": "P9"},
-        {"name": "", "spot_id": "P2"},
-        {"name": "Amine", "spot_id": "P2", "duration_min": 0},
-        {"name": "Amine", "spot_id": "P2", "duration_min": 61},
-        {"name": "Amine", "spot_id": "P2", "extra": 1},
+        {"spot_id": "P9"},
+        {"spot_id": "P2", "duration_min": 0},
+        {"spot_id": "P2", "duration_min": 61},
+        {"spot_id": "P2", "extra": 1},
     ],
 )
-def test_invalid_reservation_returns_422(api, body):
-    assert api.post(URL, json=body).status_code == 422
+def test_invalid_reservation_returns_422(api, user, body):
+    assert api.post(URL, json=body, headers=user).status_code == 422
 
 
-def test_delete_reservation(api):
-    res_id = api.post(URL, json={"name": "Amine", "spot_id": "P2"}).json()["id"]
+def test_cancel_refunds_the_fee(api, user):
+    res_id = api.post(URL, json={"spot_id": "P2"}, headers=user).json()["id"]
 
-    assert api.delete(f"{URL}/{res_id}").status_code == 204
-    assert api.delete(f"{URL}/{res_id}").status_code == 404
+    assert api.delete(f"{URL}/{res_id}", headers=user).status_code == 204
+    assert api.delete(f"{URL}/{res_id}", headers=user).status_code == 404
     assert api.get(URL).json() == []
+    assert api.get("/api/v1/me", headers=user).json()["balance"] == 5000
+
+
+def test_cannot_cancel_someone_elses_reservation(api, user):
+    res_id = api.post(URL, json={"spot_id": "P2"}, headers=user).json()["id"]
+    other = register(api, "sara@example.com", "Sara")
+
+    assert api.delete(f"{URL}/{res_id}", headers=other).status_code == 404
+    assert len(api.get(URL).json()) == 1

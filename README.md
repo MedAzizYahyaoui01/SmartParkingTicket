@@ -487,3 +487,59 @@ waiting at the gate (no car could leave any more).
 New: `test_reservations.py` (rules + 409/404/422), `test_stats.py` (buckets, local time,
 peak hours, parking time, parameter validation), and a MongoDB integration test of the
 aggregation pipelines and the reservation log. CI now also builds the dashboard.
+
+## Step 6 — Accounts, prepaid wallet, gate access and the assistant
+
+**Goal:** every driver has an account (with a UID) and a prepaid wallet; the barrier only
+opens for identified users with credit; and a chatbot at the gate and in the app understands
+English, French and Arabic (Tunisian Darija too), by text or by voice.
+
+### What was done
+
+- **Accounts** (`/auth/register`, `/auth/login`, `/me`): each account gets a UID such as
+  `SP-7KQ2M9XA`. Passwords are hashed with scrypt; sessions are signed tokens (JWT).
+- **Prepaid wallet** (amounts in millimes, never floats): top-ups through a **simulated card
+  gateway** (`/payments/checkout` then `/payments/{id}/confirm`, Luhn check, receipts; only
+  the brand and last 4 digits are stored). Every balance change writes a statement line.
+
+  | Test card | Result |
+  |---|---|
+  | 4242 4242 4242 4242 | success (Visa) |
+  | 5555 5555 5555 4444 | success (Mastercard) |
+  | 4000 0000 0000 0002 | declined |
+  | 4000 0000 0000 9995 | insufficient funds |
+
+- **Rules** (`GATE_MODE=account`): entering needs at least `MIN_ENTRY_BALANCE` and no debt,
+  plus a free spot or your own reservation. Leaving is always allowed and charges the stay
+  (first 15 min free, then per started 15 min at `HOURLY_RATE`); it may end in a negative
+  balance, which **blocks entry and reservations until the user tops up**. Reservations need
+  an account and cost `RESERVATION_FEE` (refunded if cancelled).
+- **Gate kiosk** (`/gate` page): the app shows a QR code (and 6 digits) valid 2 minutes; the
+  kiosk scans it with the camera and opens a 10-minute kiosk session for that driver. Kiosk
+  sessions can open the gate and reserve, but cannot pay or change the profile. Wrong codes
+  are limited to 5 per minute.
+- **Assistant** (`POST /api/v1/chat`): chat widget on every page, full-screen on the kiosk.
+  Voice uses the browser's speech recognition (Chrome/Edge: en-US, fr-FR, ar-TN) and replies
+  can be read aloud. Two engines share the same tools (spots, prices, busy hours, account,
+  reserve, cancel, open gate, top-up), so the same rules apply:
+  - **Claude** when `ANTHROPIC_API_KEY` is set: free-form understanding in any of the three
+    languages. The conversation is append-only (who is speaking is added as a system message),
+    which keeps the prompt cache warm. Card details are never asked for in the chat: the
+    assistant opens the secure checkout instead.
+  - **Offline rules** otherwise, or if the Claude API fails: keywords in EN / FR / Arabic /
+    Darija (Arabic letters or Latin with digits, e.g. "7ell el bab").
+- **Firmware:** in account mode the ESP32 no longer opens on its own; it waits for the API's
+  command. If the API stays silent for 10 s it goes back to the local rule, so a network
+  failure never locks the parking.
+
+### Run it
+
+Add to `.env` (see `.env.example`): `GATE_MODE=account`, a long random `JWT_SECRET`, and
+optionally `ANTHROPIC_API_KEY`. Start the API and the dashboard as in Step 5, then:
+
+1. **Sign in** → create an account → **Top up** with a test card.
+2. Open **Gate kiosk**, type the 6 digits shown on your Account page (or scan the QR code).
+3. Say or type "حل الباب", "Ouvrez la barrière" or "open the gate" → the barrier opens on the
+   next ESP32 heartbeat. "Je pars" / "I'm leaving" / "باش نخرج" charges the stay and opens it.
+
+`GET /api/v1/chat/info` says which engine is answering (`claude` or `rules`).
