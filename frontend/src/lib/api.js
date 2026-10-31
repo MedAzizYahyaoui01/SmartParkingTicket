@@ -50,6 +50,8 @@ export const api = {
   barrier: (action) => post('/barrier/command', { action }),
   occupancy: (params) => request(`/stats/occupancy?${query(params)}`),
   statsSummary: (params) => request(`/stats/summary?${query(params)}`),
+  predictions: (params) => request(`/predictions?${query(params)}`),
+  modelsCompare: () => request('/models/compare'),
 
   // Accounts and wallet
   register: (body) => post('/auth/register', body, { token: null }),

@@ -13,6 +13,7 @@ from app.services.assistant.service import AssistantService
 from app.services.gate import GateService
 from app.services.parking import ParkingService
 from app.services.payments import PaymentService
+from app.services.predictions import PredictionService
 from app.services.stats import StatsService
 
 
@@ -26,6 +27,10 @@ def get_parking(request: Request) -> ParkingService:
 
 def get_stats(request: Request) -> StatsService:
     return request.app.state.stats
+
+
+def get_predictions(request: Request) -> PredictionService:
+    return request.app.state.predictions
 
 
 async def require_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> None:

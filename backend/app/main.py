@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app import db
 from app.config import Settings, get_settings
+from app.ml.predictor import ModelStore
 from app.repositories.accounts import AccountRepository, MongoAccountRepository
 from app.repositories.history import HistoryRepository, MongoHistoryRepository
 from app.repositories.realtime import RealtimeStore, build_realtime_store
@@ -19,6 +20,7 @@ from app.routers import (
     health,
     parking,
     payments,
+    predictions,
     reservations,
     sensors,
     stats,
@@ -30,6 +32,7 @@ from app.services.background import run_periodically
 from app.services.gate import GateService
 from app.services.parking import ParkingService
 from app.services.payments import PaymentService
+from app.services.predictions import PredictionService
 from app.services.stats import StatsService
 
 logger = logging.getLogger(__name__)
@@ -64,6 +67,9 @@ def create_app(
         await service.startup()
         app.state.parking = service
         app.state.stats = StatsService(history_repo, settings.timezone)
+        app.state.predictions = PredictionService(
+            history_repo, ModelStore(settings.model_path), len(settings.spot_ids)
+        )
 
         account_service = AccountService(accounts_repo, service, settings)
         try:
@@ -116,7 +122,17 @@ def create_app(
         )
 
     app.include_router(health.router)
-    for router in (sensors, parking, reservations, stats, accounts, payments, gate, chat):
+    for router in (
+        sensors,
+        parking,
+        reservations,
+        stats,
+        predictions,
+        accounts,
+        payments,
+        gate,
+        chat,
+    ):
         app.include_router(router.router, prefix="/api/v1")
     return app
 

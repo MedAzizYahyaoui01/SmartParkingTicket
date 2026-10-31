@@ -17,6 +17,7 @@ EVENTS = "occupancy_events"
 SNAPSHOTS = "occupancy_snapshots"
 BARRIER_EVENTS = "barrier_events"
 RESERVATIONS = "reservations"
+PREDICTIONS = "predictions"
 
 
 class HistoryRepository(Protocol):
@@ -29,6 +30,7 @@ class HistoryRepository(Protocol):
     async def end_reservation(
         self, reservation_id: str, status: str, ended_at: datetime
     ) -> None: ...
+    async def insert_predictions(self, predictions: list[dict[str, Any]]) -> None: ...
 
     # Statistics. Rates are averages of the minute snapshots.
     async def occupancy_series(
@@ -63,6 +65,7 @@ class MongoHistoryRepository:
         await self.db[EVENTS].create_index([("spot_id", ASCENDING), ("ts", ASCENDING)])
         await self.db[BARRIER_EVENTS].create_index("ts")
         await self.db[EVENTS].create_index("ts")
+        await self.db[PREDICTIONS].create_index("ts")
 
     async def ping(self) -> bool:
         try:
@@ -89,6 +92,10 @@ class MongoHistoryRepository:
         await self.db[RESERVATIONS].update_one(
             {"_id": reservation_id}, {"$set": {"status": status, "ended_at": ended_at}}
         )
+
+    async def insert_predictions(self, predictions: list[dict[str, Any]]) -> None:
+        if predictions:
+            await self.db[PREDICTIONS].insert_many([dict(p) for p in predictions])
 
     async def occupancy_series(
         self, start: datetime, end: datetime, step_min: int, tz: str
@@ -142,6 +149,7 @@ class InMemoryHistoryRepository:
         self.snapshots: list[dict[str, Any]] = []
         self.barrier_events: list[dict[str, Any]] = []
         self.reservations: dict[str, dict[str, Any]] = {}
+        self.predictions: list[dict[str, Any]] = []
         self.available = True  # set to False in tests to simulate MongoDB being down
 
     def _check(self) -> None:
@@ -174,6 +182,10 @@ class InMemoryHistoryRepository:
         self._check()
         if reservation_id in self.reservations:
             self.reservations[reservation_id].update(status=status, ended_at=ended_at)
+
+    async def insert_predictions(self, predictions: list[dict[str, Any]]) -> None:
+        self._check()
+        self.predictions.extend(predictions)
 
     def _snapshots_in(self, start: datetime, end: datetime) -> list[dict[str, Any]]:
         self._check()

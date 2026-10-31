@@ -40,6 +40,7 @@ services:
       MONGO_DB: ${MONGO_DB}
       API_KEY: ${API_KEY}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      TIMEZONE: ${TIMEZONE:-UTC}
       GATE_MODE: ${GATE_MODE:-account}
       JWT_SECRET: ${JWT_SECRET}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -48,10 +49,28 @@ services:
     volumes:
       # The service-account key is mounted read-only; it is never baked into the image.
       - ./secrets:/run/secrets:ro
+      # Written by the trainer; the API reloads the model when the file changes
+      - models:/app/models
     ports:
       - "8000:8000"
 
-  # frontend, trainer and firebase-emulator are added in later phases.
+  # Run once, then again whenever you want to retrain: docker compose run --rm trainer
+  trainer:
+    build: ./backend
+    profiles: ["tools"]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongo:27017/?authSource=admin
+      MONGO_DB: ${MONGO_DB}
+      TIMEZONE: ${TIMEZONE:-UTC}
+    volumes:
+      - models:/app/models
+    command: ["python", "-m", "app.ml.train"]
+
+  # frontend and firebase-emulator are added in later phases.
 
 volumes:
   mongo-data:
+  models:

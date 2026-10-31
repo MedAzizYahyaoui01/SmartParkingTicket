@@ -12,6 +12,7 @@ import ReservationsPage from './pages/ReservationsPage'
 
 // Heavy pages (charts, QR code libraries) are only loaded when opened
 const StatsPage = lazy(() => import('./pages/StatsPage'))
+const PredictionPage = lazy(() => import('./pages/PredictionPage'))
 const GatePage = lazy(() => import('./pages/GatePage'))
 const AccountPage = lazy(() => import('./pages/AccountPage'))
 
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/', label: 'Live map' },
   { to: '/reservations', label: 'Reservations' },
   { to: '/stats', label: 'Statistics' },
+  { to: '/predictions', label: 'Prediction' },
   { to: '/gate', label: 'Gate kiosk' },
 ]
 
@@ -124,6 +126,14 @@ export default function App() {
           <Route path="/" element={<LivePage />} />
           <Route path="/reservations" element={<ReservationsPage />} />
           <Route path="/gate" element={<Suspense fallback={loading}><GatePage /></Suspense>} />
+          <Route
+            path="/predictions"
+            element={
+              <Suspense fallback={loading}>
+                <PredictionPage />
+              </Suspense>
+            }
+          />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/account" element={<Suspense fallback={loading}><AccountPage /></Suspense>} />
           <Route

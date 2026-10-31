@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     topup_min: int = 5000
     topup_max: int = 500_000
 
+    # Occupancy prediction: the model saved by `python -m app.ml.train` (relative to the
+    # API's working directory). The API reloads it when the file changes.
+    model_path: str = "models/best_model.joblib"
+
     # Assistant. "auto" uses Claude when an API key is set, the offline rules otherwise.
     chat_engine: Literal["auto", "claude", "rules"] = "auto"
     anthropic_api_key: str = ""

@@ -543,3 +543,88 @@ optionally `ANTHROPIC_API_KEY`. Start the API and the dashboard as in Step 5, th
    next ESP32 heartbeat. "Je pars" / "I'm leaving" / "باش نخرج" charges the stay and opens it.
 
 `GET /api/v1/chat/info` says which engine is answering (`claude` or `rules`).
+
+## Step 7 — Occupancy prediction (AI module)
+
+**Goal:** predict the occupancy rate 15 minutes to 3 hours ahead, compare four models on
+the same data, and show the forecast, a "best time to come" hint and the comparison on the
+dashboard.
+
+### What was done
+
+- **Data** (`app/ml/synthetic.py`, `tools/seed_history.py`): the synthetic generator now lives
+  in the backend, shared by the seeding script and the trainer. Public holidays (fixed-date
+  Tunisian ones) are as calm as weekends. The trainer reads every snapshot in MongoDB
+  (synthetic + live), averaged per 5 minutes; gaps (sensors offline) stay gaps.
+- **Features** (`app/ml/features.py`), one row per moment `t`, target = rate at `t + h`:
+  calendar of the target time (hour, minute, weekday, weekend, holiday) with sin/cos
+  encodings; the rate now and 5/15/30/60 min ago; the rate at the same time yesterday and
+  last week; mean and std over the last 30 and 60 min. A test rewrites the future and
+  checks that no feature changes, so **nothing leaks from the future**.
+- **Models** (`app/ml/models.py`), one per horizon (15, 30, 60, 120, 180 min):
+
+  | Model | Avg MAE* | Role |
+  |---|---|---|
+  | Naive: same time last week | 20.2 pts | The bar to beat |
+  | Linear regression on lags (ridge) | 14.0 pts | Classic, interpretable |
+  | **Random Forest** | **12.9 pts** | Robust non-linear model — usually the one in use |
+  | XGBoost | 13.2 pts | Gradient boosting |
+
+  \* 90 synthetic days, averaged over the 5 horizons; 11.3 pts at 30 min. With 4 spots the
+  rate can only be 0, 25, 50, 75 or 100%, so a few points of error is the floor. Large
+  Random Forest leaves (30 samples) average out that noise: more accurate *and* a 11 MB
+  model instead of 60 MB.
+
+  The report planned SARIMAX for the "temporal regression"; a linear model on the lag
+  features (the report's alternative) is used instead, since a weekly season on 5-minute
+  data (2016 steps) is too heavy for SARIMAX.
+- **Protocol** (`app/ml/train.py`): time-based split (first 80% of the timeline to train, last
+  20% to test; a training row's *target* must be before the split). MAE, RMSE, R², training
+  and prediction time. `--tune` adds a grid search with `TimeSeriesSplit` (5 folds). The
+  family with the lowest average MAE is saved to `models/best_model.joblib` with the whole
+  comparison and the feature importances.
+- **API**: the model is loaded at start-up and **reloaded whenever the file changes**, so
+  retraining needs no restart. Each prediction served is stored in MongoDB (`predictions`),
+  once per 5-min bucket, to compare later with what really happened.
+
+  | Method | Route | Purpose |
+  |---|---|---|
+  | GET | `/api/v1/predictions?horizon=60` | Rate and free spots now and at each horizon ≤ `horizon`, plus the least busy moment |
+  | GET | `/api/v1/models/compare` | MAE / RMSE / R² per model and horizon, training data, feature importance |
+
+  Both answer **503** with an explanation when there is no model yet, less than a week of
+  history, or no data for 6 hours (sensors offline). Data older than 15 min is flagged
+  `stale`.
+- **Dashboard** (`/predictions`): now / in 30 min / in 1 hour ("about 2 free, 60% full"),
+  the best time to come in the next 3 hours, the forecast curve continuing the last 3 hours
+  of recorded data, the comparison table per horizon, and the feature importance of Random
+  Forest and XGBoost. Refreshes every minute.
+- **Docker**: `trainer` service (profile `tools`) sharing a `models` volume with the API.
+  The API container now also gets `TIMEZONE` from `.env`.
+- Dependencies: pandas, scikit-learn, `xgboost-cpu` (same `import xgboost`, without the
+  ~200 MB of NVIDIA libraries), joblib.
+
+### Run it
+
+```bash
+# 1. History: 90 synthetic days in MongoDB (it stops where real data starts)
+python tools/seed_history.py --days 90
+
+# 2. Train (from backend/): prints the comparison table, writes models/best_model.joblib
+cd backend
+python -m app.ml.train                      # from MongoDB, ~20 s
+python -m app.ml.train --source synthetic   # or without a database
+python -m app.ml.train --tune               # with the TimeSeriesSplit grid search (slower)
+
+# In Docker
+docker compose run --rm trainer
+```
+
+Then open **Prediction** in the dashboard (the API picks the new model up by itself).
+
+### Tests (159, coverage 89%)
+
+`tests/test_ml.py`: no future leakage, lags and calendar at the right times (local time),
+cyclical encoding, the models beat the naive baseline, time-based split, predictions in
+[0, 1], model reload, and the two endpoints (no model, not enough history, sensors offline,
+stale data, horizon limits, logging once per bucket).
