@@ -67,10 +67,12 @@ services:
       TIMEZONE: ${TIMEZONE:-UTC}
     volumes:
       - models:/app/models
-    command: ["python", "-m", "app.ml.train"]
+      - ml-data:/app/data # the Birmingham dataset, downloaded once
+    command: ["python", "-m", "app.ml.train", "--birmingham"]
 
   # frontend and firebase-emulator are added in later phases.
 
 volumes:
   mongo-data:
   models:
+  ml-data:

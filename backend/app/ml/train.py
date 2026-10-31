@@ -3,6 +3,7 @@
     python -m app.ml.train                       # history from MongoDB (synthetic + live)
     python -m app.ml.train --source synthetic    # 90 synthetic days, no database needed
     python -m app.ml.train --tune                # + hyper-parameter search (slower)
+    python -m app.ml.train --birmingham          # + the same comparison on real car parks
 
 Protocol: time-based split, never random — every model is trained on the first 80% of the
 timeline and scored on the last 20% (a random split would leak the future into training).
@@ -14,7 +15,8 @@ the API can serve both predictions and the comparison table.
 import argparse
 import random
 import time
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,7 +29,8 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 
 from app.config import get_settings
-from app.ml.features import FEATURES, HORIZONS_MIN, STEP_MIN, build_features, to_series
+from app.ml.calendar import is_holiday
+from app.ml.features import HORIZONS_MIN, STEP_MIN, build_features, feature_names, to_series
 from app.ml.models import LABELS, PARAM_GRIDS, candidates, feature_importance
 from app.ml.synthetic import simulate
 
@@ -69,42 +72,53 @@ def _fit(key: str, model: Any, X: pd.DataFrame, y: pd.Series, tune: bool) -> Any
     return model.fit(X, y)
 
 
-def train(
-    series: pd.Series,
+def evaluate(
+    series: list[pd.Series],
     tz: str,
-    horizons: tuple[int, ...] = HORIZONS_MIN,
-    source: str = "",
+    horizons: tuple[int, ...],
+    step_min: int = STEP_MIN,
+    holidays: Callable[[date], bool] = is_holiday,
     fast: bool = False,
     tune: bool = False,
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Trains every candidate for every horizon; returns the artifact to save."""
-    series = series.asfreq(f"{STEP_MIN}min")
-    known = series.dropna()
-    if known.empty:
+    """Trains and scores every candidate for every horizon on one or more series (e.g. one
+    per car park, pooled into one dataset), with the same time-based split for all."""
+    series = [s.asfreq(f"{step_min}min") for s in series]
+    known = [s.dropna() for s in series if s.notna().any()]
+    if not known:
         raise ValueError("no occupancy history to learn from")
-    start, end = known.index[0], known.index[-1]
+    start = min(k.index[0] for k in known)
+    end = max(k.index[-1] for k in known)
     cutoff = start + (end - start) * TRAIN_SHARE
+    features = feature_names(step_min)
 
     results: list[dict[str, Any]] = []
     fitted: dict[str, dict[int, Any]] = {key: {} for key in LABELS}
     importances: dict[str, list[dict[str, float]]] = {}
 
     for horizon in horizons:
-        X, y = build_features(series, horizon, tz)
-        usable = X.notna().all(axis=1) & y.notna()
-        target_time = X.index + pd.Timedelta(minutes=horizon)
-        # A training row's target must be before the cutoff, so no test value is ever seen
-        train_rows = usable & (target_time < cutoff)
-        test_rows = usable & (X.index >= cutoff)
-        if train_rows.sum() < MIN_TRAIN_ROWS or test_rows.sum() == 0:
+        train_parts, test_parts = [], []
+        for s in series:
+            X, y = build_features(s, horizon, tz, step_min, holidays)
+            usable = X.notna().all(axis=1) & y.notna()
+            target_time = X.index + pd.Timedelta(minutes=horizon)
+            # A training row's target must be before the cutoff, so no test value is seen
+            train_parts.append(
+                (X[usable & (target_time < cutoff)], y[usable & (target_time < cutoff)])
+            )
+            test_parts.append((X[usable & (X.index >= cutoff)], y[usable & (X.index >= cutoff)]))
+        # Pooled rows in time order (TimeSeriesSplit relies on it when tuning)
+        X_train = pd.concat([x for x, _ in train_parts]).sort_index(kind="stable")
+        y_train = pd.concat([y for _, y in train_parts]).sort_index(kind="stable")
+        X_test = pd.concat([x for x, _ in test_parts])
+        y_test = pd.concat([y for _, y in test_parts])
+        if len(X_train) < MIN_TRAIN_ROWS or len(X_test) == 0:
             raise ValueError(
-                f"not enough history: {int(train_rows.sum())} training rows for the "
+                f"not enough history: {len(X_train)} training rows for the "
                 f"{horizon}-min horizon, at least {MIN_TRAIN_ROWS} needed (about 10 days "
                 "of data, since a feature looks one week back)"
             )
-        X_train, y_train = X[train_rows], y[train_rows]
-        X_test, y_test = X[test_rows], y[test_rows]
 
         for key, factory in candidates(fast, seed).items():
             t0 = time.perf_counter()
@@ -125,33 +139,27 @@ def train(
                     "r2": float(r2_score(y_test, predicted)),
                     "fit_s": round(fit_s, 3),
                     "predict_s": round(predict_s, 4),
-                    "train_rows": int(train_rows.sum()),
-                    "test_rows": int(test_rows.sum()),
+                    "train_rows": len(X_train),
+                    "test_rows": len(X_test),
                 }
             )
-            importance = feature_importance(model, FEATURES)
+            importance = feature_importance(model, features)
             if importance:
                 importances.setdefault(key, []).append(importance)
 
     mean_mae = {
         key: float(np.mean([r["mae"] for r in results if r["model"] == key])) for key in LABELS
     }
-    best = min(mean_mae, key=mean_mae.get)
     return {
-        "version": ARTIFACT_VERSION,
-        "model": best,
-        "label": LABELS[best],
-        "models": fitted[best],
-        "features": FEATURES,
-        "step_min": STEP_MIN,
+        "best": min(mean_mae, key=mean_mae.get),
+        "fitted": fitted,
+        "features": features,
+        "step_min": step_min,
         "horizons": list(horizons),
-        "timezone": tz,
-        "trained_at": datetime.now(UTC),
         "data": {
-            "source": source,
             "start": start.to_pydatetime(),
             "end": end.to_pydatetime(),
-            "points": int(known.size),
+            "points": int(sum(k.size for k in known)),
             "train_until": cutoff.to_pydatetime(),
         },
         "mean_mae": mean_mae,
@@ -160,13 +168,44 @@ def train(
         "importance": {
             key: dict(
                 sorted(
-                    ((f, float(np.mean([imp[f] for imp in values]))) for f in FEATURES),
+                    ((f, float(np.mean([imp[f] for imp in values]))) for f in features),
                     key=lambda item: item[1],
                     reverse=True,
                 )
             )
             for key, values in importances.items()
         },
+    }
+
+
+def train(
+    series: pd.Series,
+    tz: str,
+    horizons: tuple[int, ...] = HORIZONS_MIN,
+    source: str = "",
+    fast: bool = False,
+    tune: bool = False,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Trains every candidate for every horizon; returns the artifact to save (the best
+    model family, with the whole comparison)."""
+    ev = evaluate([series], tz, horizons, fast=fast, tune=tune, seed=seed)
+    best = ev["best"]
+    return {
+        "version": ARTIFACT_VERSION,
+        "model": best,
+        "label": LABELS[best],
+        "models": ev["fitted"][best],
+        "features": ev["features"],
+        "step_min": ev["step_min"],
+        "horizons": ev["horizons"],
+        "timezone": tz,
+        "trained_at": datetime.now(UTC),
+        "data": {"source": source, **ev["data"]},
+        "mean_mae": ev["mean_mae"],
+        "results": ev["results"],
+        "importance": ev["importance"],
+        "benchmarks": {},  # the same comparison on other datasets (see birmingham.py)
     }
 
 
@@ -177,7 +216,9 @@ def save(artifact: dict[str, Any], path: Path) -> None:
     tmp.replace(path)  # atomic: the API never loads a half-written file
 
 
-def print_report(artifact: dict[str, Any]) -> None:
+def print_report(artifact: dict[str, Any], title: str = "") -> None:
+    if title:
+        print(f"\n{title}")
     print(f"\n{'Model':<30} {'Horizon':>8} {'MAE':>7} {'RMSE':>7} {'R2':>7} {'Fit (s)':>8}")
     for r in artifact["results"]:
         print(
@@ -185,7 +226,7 @@ def print_report(artifact: dict[str, Any]) -> None:
             f"{r['r2']:>7.3f} {r['fit_s']:>8.2f}"
         )
     print("\nAverage MAE: " + ", ".join(f"{k} {v:.4f}" for k, v in artifact["mean_mae"].items()))
-    print(f"Best model: {artifact['label']}")
+    print(f"Best model: {artifact.get('label') or artifact.get('best_label')}")
 
 
 def main() -> None:
@@ -197,6 +238,15 @@ def main() -> None:
     parser.add_argument("--tune", action="store_true", help="TimeSeriesSplit grid search")
     parser.add_argument("--fast", action="store_true", help="small ensembles (quick check)")
     parser.add_argument("--output", type=Path, default=Path(settings.model_path))
+    parser.add_argument(
+        "--birmingham",
+        nargs="?",
+        type=Path,
+        const=Path("data/parking-birmingham.zip"),
+        metavar="PATH",
+        help="also run the comparison on the real UCI Birmingham car parks "
+        "(downloaded to PATH the first time, ~240 KB)",
+    )
     args = parser.parse_args()
 
     if args.source == "synthetic":
@@ -215,7 +265,17 @@ def main() -> None:
         tune=args.tune,
         seed=args.seed,
     )
-    print_report(artifact)
+    print_report(artifact, f"Our parking ({source})")
+
+    if args.birmingham:
+        from app.ml import birmingham  # imports this module: loaded only when asked
+
+        path = birmingham.download(args.birmingham)
+        print(f"\nBenchmark on real data: {path}...")
+        bench = birmingham.benchmark(path, fast=args.fast, seed=args.seed)
+        artifact["benchmarks"]["birmingham"] = bench
+        print_report(bench, bench["source"])
+
     save(artifact, args.output)
     print(f"Saved to {args.output}")
 

@@ -43,12 +43,32 @@ class FeatureImportance(BaseModel):
     importance: float  # share of the total, 0..1
 
 
-class TrainingData(BaseModel):
-    source: str
+class DataPeriod(BaseModel):
     start: datetime
     end: datetime
-    points: int  # 5-min points of history
+    points: int  # points of history on the model's grid (all series together)
     train_until: datetime  # time-based split: train before, test after
+
+
+class TrainingData(DataPeriod):
+    source: str
+
+
+class BenchmarkOut(BaseModel):
+    """The same comparison on another dataset (scores only, not used for predictions)."""
+
+    name: str
+    title: str
+    source: str
+    url: str
+    best_model: str
+    label: str
+    step_min: int
+    horizons: list[int]
+    data: DataPeriod
+    mean_mae: dict[str, float]
+    results: list[ModelResult]
+    feature_importance: dict[str, list[FeatureImportance]]
 
 
 class ModelsCompareOut(BaseModel):
@@ -61,3 +81,4 @@ class ModelsCompareOut(BaseModel):
     mean_mae: dict[str, float]
     results: list[ModelResult]
     feature_importance: dict[str, list[FeatureImportance]]  # rf and xgboost only
+    benchmarks: list[BenchmarkOut]  # e.g. the real Birmingham car parks, if trained with it

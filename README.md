@@ -583,6 +583,27 @@ dashboard.
   and prediction time. `--tune` adds a grid search with `TimeSeriesSplit` (5 folds). The
   family with the lowest average MAE is saved to `models/best_model.joblib` with the whole
   comparison and the feature importances.
+- **Benchmark on real data** (`app/ml/birmingham.py`, `--birmingham`): the synthetic history
+  only proves the models learned our own generator, so the same features, models and
+  time-based split also run on the [UCI Parking Birmingham](https://archive.ics.uci.edu/dataset/482/parking+birmingham)
+  dataset (CC BY 4.0, downloaded once to `backend/data/`, ~240 KB, ignored by Git):
+  28 car parks pooled together (2 with only a few days of data are left out), 4 Oct - 19 Dec
+  2016, a reading every 30 min from 8:00 to 16:30. Readings are rounded to the nearest half
+  hour and counts above capacity (sensor drift) are clipped. The grid is 30 min, so the 5 and
+  15 min lags are dropped (the feature builder takes the step as a parameter).
+
+  | Model | MAE 30 min | MAE 1 h | MAE 2 h |
+  |---|---|---|---|
+  | Naive: same time last week | 4.6 pts | 4.7 pts | 4.7 pts |
+  | Linear regression on lags | 1.5 pts | 2.6 pts | 4.0 pts |
+  | Random Forest | 1.5 pts | 2.4 pts | 3.6 pts |
+  | **XGBoost** | **1.4 pts** | **2.2 pts** | **3.4 pts** |
+
+  Same ranking idea as on our parking: every model beats the baseline and the tree models
+  are best, with XGBoost slightly ahead on large car parks (smooth rates) and Random Forest
+  on our 4 spots (very noisy rates). R² is ~0.99 mostly because the car parks differ a lot
+  from each other, so MAE is the measure to quote. These models are only scored: the scores
+  are saved in the model file and shown on the dashboard, the live forecast never uses them.
 - **API**: the model is loaded at start-up and **reloaded whenever the file changes**, so
   retraining needs no restart. Each prediction served is stored in MongoDB (`predictions`),
   once per 5-min bucket, to compare later with what really happened.
@@ -590,7 +611,7 @@ dashboard.
   | Method | Route | Purpose |
   |---|---|---|
   | GET | `/api/v1/predictions?horizon=60` | Rate and free spots now and at each horizon ≤ `horizon`, plus the least busy moment |
-  | GET | `/api/v1/models/compare` | MAE / RMSE / R² per model and horizon, training data, feature importance |
+  | GET | `/api/v1/models/compare` | MAE / RMSE / R² per model and horizon, training data, feature importance, and the benchmarks (Birmingham) if trained with them |
 
   Both answer **503** with an explanation when there is no model yet, less than a week of
   history, or no data for 6 hours (sensors offline). Data older than 15 min is flagged
@@ -598,8 +619,9 @@ dashboard.
 - **Dashboard** (`/predictions`): now / in 30 min / in 1 hour ("about 2 free, 60% full"),
   the best time to come in the next 3 hours, the forecast curve continuing the last 3 hours
   of recorded data, the comparison table per horizon, and the feature importance of Random
-  Forest and XGBoost. Refreshes every minute.
-- **Docker**: `trainer` service (profile `tools`) sharing a `models` volume with the API.
+  Forest and XGBoost, then the Birmingham comparison. Refreshes every minute.
+- **Docker**: `trainer` service (profile `tools`, runs with `--birmingham`) sharing a
+  `models` volume with the API; the dataset is kept in an `ml-data` volume.
   The API container now also gets `TIMEZONE` from `.env`.
 - Dependencies: pandas, scikit-learn, `xgboost-cpu` (same `import xgboost`, without the
   ~200 MB of NVIDIA libraries), joblib.
@@ -615,6 +637,7 @@ cd backend
 python -m app.ml.train                      # from MongoDB, ~20 s
 python -m app.ml.train --source synthetic   # or without a database
 python -m app.ml.train --tune               # with the TimeSeriesSplit grid search (slower)
+python -m app.ml.train --birmingham         # + the benchmark on the real car parks (~10 s)
 
 # In Docker
 docker compose run --rm trainer
@@ -622,9 +645,11 @@ docker compose run --rm trainer
 
 Then open **Prediction** in the dashboard (the API picks the new model up by itself).
 
-### Tests (159, coverage 89%)
+### Tests (165, coverage 89%)
 
 `tests/test_ml.py`: no future leakage, lags and calendar at the right times (local time),
 cyclical encoding, the models beat the naive baseline, time-based split, predictions in
 [0, 1], model reload, and the two endpoints (no model, not enough history, sensors offline,
-stale data, horizon limits, logging once per bucket).
+stale data, horizon limits, logging once per bucket). The Birmingham benchmark is tested on
+a small generated file in the UCI format (half-hour rounding, clipping, 30-min features,
+the comparison in `/models/compare`), so the tests never need the network.

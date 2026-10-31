@@ -2,6 +2,7 @@
 
 import os
 import random
+import zipfile
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -12,8 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.ml import birmingham
 from app.ml.calendar import is_holiday
-from app.ml.features import FEATURES, build_features, to_series
+from app.ml.features import FEATURES, build_features, feature_names, to_series
 from app.ml.predictor import ModelStore
 from app.ml.synthetic import simulate
 from app.ml.train import save, synthetic_series, train
@@ -279,3 +281,90 @@ def test_models_compare(ml_client, artifact):
     assert {"mae", "rmse", "r2", "fit_s"} <= set(body["results"][0])
     top = body["feature_importance"]["rf"][0]
     assert top["label"] and 0 < top["importance"] <= 1
+
+
+# ------------------------------------------------------------------------ Birmingham benchmark
+
+
+def _birmingham_zip(path, days: int = 30) -> None:
+    """A small file in the UCI format: readings near :00 and :30 from 8:00 to 16:30."""
+    rng = np.random.default_rng(1)
+    rows = []
+    for park, capacity in [("A", 500), ("B", 300), ("C", 800)]:
+        for day in pd.date_range("2016-10-03", periods=days, freq="D"):  # a Monday
+            for slot in pd.date_range(day + pd.Timedelta(hours=8), periods=18, freq="30min"):
+                h = slot.hour + slot.minute / 60
+                level = 0.15 + 0.6 * np.exp(-(((h - 12.5) / 2.5) ** 2))
+                level *= 0.6 if day.weekday() >= 5 else 1.0
+                occupancy = int(capacity * level + rng.normal(0, capacity * 0.03))
+                jitter = pd.Timedelta(seconds=int(rng.integers(-60, 60)))
+                rows.append((park, capacity, occupancy, slot + jitter))
+    rows.append(("A", 500, 520, pd.Timestamp("2016-10-03 12:29:42")))  # more than full
+    rows += [("TINY", 100, 50, pd.Timestamp("2016-10-03 09:00:00"))] * 10  # too few readings
+    csv = pd.DataFrame(rows, columns=["SystemCodeNumber", "Capacity", "Occupancy", "LastUpdated"])
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("dataset.csv", csv.to_csv(index=False))
+
+
+@pytest.fixture(scope="module")
+def birmingham_file(tmp_path_factory):
+    path = tmp_path_factory.mktemp("data") / "parking-birmingham.zip"
+    _birmingham_zip(path)
+    return path
+
+
+def test_birmingham_readings_become_30_min_series(birmingham_file):
+    parks = birmingham.car_park_series(birmingham.read(birmingham_file))
+
+    assert set(parks) == {"A", "B", "C"}  # TINY has too few readings
+    a = parks["A"].dropna()
+    assert (a.index.minute % 30 == 0).all()  # 07:59:42 -> 08:00, 08:29:30 -> 08:30
+    assert a.max() <= 1.0  # 520 cars for 500 places is clipped
+    assert a.index.hour.min() == 8
+
+
+def test_birmingham_features_fit_the_30_min_grid():
+    names = feature_names(30)
+    assert "lag_30" in names and "lag_60" in names
+    assert "lag_5" not in names and "lag_15" not in names
+    assert "roll_mean_60" in names and "roll_mean_30" not in names
+
+
+def test_birmingham_benchmark(birmingham_file):
+    bench = birmingham.benchmark(birmingham_file, fast=True)
+
+    assert bench["step_min"] == 30
+    pairs = {(r["model"], r["horizon_min"]) for r in bench["results"]}
+    assert pairs == {(m, h) for m in ("naive", "linear", "rf", "xgboost") for h in (30, 60, 120)}
+    assert bench["best"] != "naive"
+    assert "lag_5" not in bench["importance"]["rf"]
+
+
+def test_birmingham_download_keeps_an_existing_file(birmingham_file):
+    assert birmingham.download(birmingham_file) == birmingham_file  # no network call
+
+
+def test_models_compare_includes_the_benchmark(
+    artifact, birmingham_file, settings, store, history, account_repo, tmp_path
+):
+    path = tmp_path / "model.joblib"
+    bench = birmingham.benchmark(birmingham_file, fast=True)
+    save({**artifact, "benchmarks": {"birmingham": bench}}, path)
+    app = create_app(
+        settings.model_copy(update={"model_path": str(path)}),
+        store=store,
+        history=history,
+        account_repo=account_repo,
+        background_tasks=False,
+    )
+    with TestClient(app) as c:
+        body = c.get("/api/v1/models/compare").json()
+
+    (b,) = body["benchmarks"]
+    assert b["name"] == "birmingham"
+    assert b["step_min"] == 30
+    assert len(b["results"]) == 12
+
+
+def test_models_compare_without_benchmark(ml_client):
+    assert ml_client.get("/api/v1/models/compare").json()["benchmarks"] == []

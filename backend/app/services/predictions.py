@@ -12,6 +12,8 @@ from app.ml.features import FEATURE_LABELS, LOOKBACK, build_features, to_series
 from app.ml.predictor import ModelStore
 from app.repositories.history import HistoryRepository
 from app.schemas.predictions import (
+    BenchmarkOut,
+    DataPeriod,
     FeatureImportance,
     ModelResult,
     ModelsCompareOut,
@@ -157,13 +159,32 @@ class PredictionService:
             data=TrainingData(**artifact["data"]),
             mean_mae=artifact["mean_mae"],
             results=[ModelResult(**r) for r in artifact["results"]],
-            feature_importance={
-                model: [
-                    FeatureImportance(
-                        feature=f, label=FEATURE_LABELS.get(f, f), importance=round(v, 4)
-                    )
-                    for f, v in values.items()
-                ]
-                for model, values in artifact["importance"].items()
-            },
+            feature_importance=_importance(artifact["importance"]),
+            benchmarks=[
+                BenchmarkOut(
+                    name=b["name"],
+                    title=b["title"],
+                    source=b["source"],
+                    url=b["url"],
+                    best_model=b["best"],
+                    label=b["best_label"],
+                    step_min=b["step_min"],
+                    horizons=b["horizons"],
+                    data=DataPeriod(**b["data"]),
+                    mean_mae=b["mean_mae"],
+                    results=[ModelResult(**r) for r in b["results"]],
+                    feature_importance=_importance(b["importance"]),
+                )
+                for b in artifact.get("benchmarks", {}).values()
+            ],
         )
+
+
+def _importance(by_model: dict[str, dict[str, float]]) -> dict[str, list[FeatureImportance]]:
+    return {
+        model: [
+            FeatureImportance(feature=f, label=FEATURE_LABELS.get(f, f), importance=round(v, 4))
+            for f, v in values.items()
+        ]
+        for model, values in by_model.items()
+    }

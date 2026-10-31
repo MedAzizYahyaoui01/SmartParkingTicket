@@ -113,7 +113,9 @@ function ForecastChart({ prediction, history }) {
   )
 }
 
-function ModelComparison({ compare }) {
+/** Scores per model for one horizon at a time. `compare` is our parking or a benchmark:
+ *  both have horizons, results and best_model. */
+function ModelComparison({ compare, badge = 'In use', children }) {
   const [horizon, setHorizon] = useState(compare.horizons.includes(30) ? 30 : compare.horizons[0])
   const rows = compare.results.filter((r) => r.horizon_min === horizon)
   const bestMae = Math.min(...rows.map((r) => r.mae))
@@ -154,7 +156,7 @@ function ModelComparison({ compare }) {
                 <td className="py-1.5">
                   {r.label}
                   {r.model === compare.best_model && (
-                    <span className="ml-2 rounded-full bg-accent/10 px-2 py-0.5 text-xs text-accent">In use</span>
+                    <span className="ml-2 rounded-full bg-accent/10 px-2 py-0.5 text-xs text-accent">{badge}</span>
                   )}
                 </td>
                 <td className="py-1.5 text-right">
@@ -169,15 +171,12 @@ function ModelComparison({ compare }) {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-muted">
-        MAE = how far off the prediction is on average: 8 pts means it says 50% when the parking is 42% or 58% full. In use: the
-        model with the lowest MAE over all horizons. Trained on {compare.data.source}, {compare.data.points.toLocaleString()} points
-        of 5 min; scored on the data after {new Date(compare.data.train_until).toLocaleDateString([], { day: 'numeric', month: 'short' })}{' '}
-        that it never saw (time-based split).
-      </p>
+      <p className="text-xs text-muted">{children}</p>
     </div>
   )
 }
+
+const shortDate = (d) => new Date(d).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })
 
 function FeatureImportance({ compare }) {
   const models = Object.keys(compare.feature_importance)
@@ -318,13 +317,32 @@ export default function PredictionPage() {
       {compare && (
         <div className="grid gap-4 xl:grid-cols-[3fr_2fr]">
           <Card title="Model comparison (test period)">
-            <ModelComparison compare={compare} />
+            <ModelComparison compare={compare}>
+              MAE = how far off the prediction is on average: 8 pts means it says 50% when the parking is 42% or 58% full. In use:
+              the model with the lowest MAE over all horizons. Trained on {compare.data.source},{' '}
+              {compare.data.points.toLocaleString()} points of 5 min; scored on the data after {shortDate(compare.data.train_until)}{' '}
+              that it never saw (time-based split).
+            </ModelComparison>
           </Card>
           <Card title="What the model looks at">
             <FeatureImportance compare={compare} />
           </Card>
         </div>
       )}
+
+      {compare?.benchmarks.map((b) => (
+        <Card key={b.name} title={`Same comparison on real data: ${b.title}`}>
+          <ModelComparison compare={b} badge="Best">
+            Our parking's history is synthetic, so the same features, models and time-based split are also run on{' '}
+            <a href={b.url} target="_blank" rel="noreferrer" className="underline hover:text-ink-2">
+              {b.source}
+            </a>
+            , {shortDate(b.data.start)} – {shortDate(b.data.end)}; scored after {shortDate(b.data.train_until)}. Steps of{' '}
+            {b.step_min} min, so there are no 5 and 15 min lags. R² is high mostly because the car parks differ a lot from each
+            other: MAE is the fairer measure. These models are only scored, never used for the live forecast.
+          </ModelComparison>
+        </Card>
+      ))}
     </div>
   )
 }
